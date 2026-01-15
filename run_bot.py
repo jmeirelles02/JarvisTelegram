@@ -165,7 +165,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "**Jarvis Seu Assistente Financeiro**\n\n"
         "Coisas que pode me pedir:\n"
-        "👉 `Para definir metas para você mesmo digite: /meta [categoria] [valor]`\n"
+        "👉 'Para definir metas para você mesmo digite: /meta [categoria] [valor]'\n"
         "👉 'Para exportar uma planilha digite: Exportar planilha'\n"
         "👉 'Para obter um resumo digite: Me dê um resumo'\n"
         "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'."
