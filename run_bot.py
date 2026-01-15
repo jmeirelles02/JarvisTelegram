@@ -3,6 +3,7 @@ import logging
 import asyncio
 import io
 import matplotlib.pyplot as plt
+import pandas as pd
 from datetime import datetime
 from collections import Counter
 from dotenv import load_dotenv
@@ -20,12 +21,11 @@ logging.basicConfig(
 
 load_dotenv()
 
-models.Base.metadata.create_all(bind=database.engine)
-
-def salvar_transacao(dados_ia):
+def salvar_transacao(dados_ia, user_id):
     session = database.SessionLocal()
     try:
         nova = models.Transacao(**dados_ia)
+        nova.user_id = user_id
         session.add(nova)
         session.commit()
         return True
@@ -35,14 +35,14 @@ def salvar_transacao(dados_ia):
     finally:
         session.close()
 
-def definir_meta_db(categoria, valor):
+def definir_meta_db(categoria, valor, user_id):
     session = database.SessionLocal()
     try:
-        meta = session.query(models.Meta).filter_by(categoria=categoria).first()
+        meta = session.query(models.Meta).filter_by(categoria=categoria, user_id=user_id).first()
         if meta:
             meta.valor_limite = valor
         else:
-            meta = models.Meta(categoria=categoria, valor_limite=valor)
+            meta = models.Meta(categoria=categoria, valor_limite=valor, user_id=user_id)
             session.add(meta)
         session.commit()
         return True
@@ -52,10 +52,10 @@ def definir_meta_db(categoria, valor):
     finally:
         session.close()
 
-def verificar_alertas(categoria):
+def verificar_alertas(categoria, user_id):
     session = database.SessionLocal()
     try:
-        meta = session.query(models.Meta).filter_by(categoria=categoria).first()
+        meta = session.query(models.Meta).filter_by(categoria=categoria, user_id=user_id).first()
         if not meta:
             return ""
 
@@ -63,6 +63,7 @@ def verificar_alertas(categoria):
         ano_atual = datetime.now().year
         
         total_gasto = session.query(func.sum(models.Transacao.valor)).filter(
+            models.Transacao.user_id == user_id,
             models.Transacao.categoria == categoria,
             models.Transacao.tipo == 'Saida',
             extract('month', models.Transacao.data) == mes_atual,
@@ -72,9 +73,9 @@ def verificar_alertas(categoria):
         porcentagem = (total_gasto / meta.valor_limite) * 100
         
         if porcentagem >= 100:
-            return f"\n\n**ALERTA:** Você estourou sua meta de {categoria}! ({porcentagem:.1f}%)"
+            return f"\n\n🚨 **ALERTA VERMELHO:** Você estourou sua meta de {categoria}! ({porcentagem:.1f}%)"
         elif porcentagem >= 80:
-            return f"\n\n**Atenção:** Você já usou {porcentagem:.1f}% da meta de {categoria}."
+            return f"\n\n⚠️ **Atenção:** Você já usou {porcentagem:.1f}% da meta de {categoria}."
         
         return ""
     except Exception as e:
@@ -83,11 +84,32 @@ def verificar_alertas(categoria):
     finally:
         session.close()
 
-def buscar_dados_relatorio():
+def buscar_dados_relatorio(user_id):
     session = database.SessionLocal()
     try:
-        transacoes = session.query(models.Transacao).filter_by(tipo="Saida").all()
+        transacoes = session.query(models.Transacao).filter_by(user_id=user_id, tipo="Saida").all()
         return transacoes
+    finally:
+        session.close()
+
+def gerar_arquivo_excel(user_id):
+    session = database.SessionLocal()
+    try:
+        query = session.query(models.Transacao).filter_by(user_id=user_id).statement
+        df = pd.read_sql(query, session.bind)
+        
+        if 'data' in df.columns:
+            df['data'] = pd.to_datetime(df['data']).dt.tz_localize(None)
+        
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Extrato')
+        
+        buffer.seek(0)
+        return buffer
+    except Exception as e:
+        print(f"Erro ao gerar Excel: {e}")
+        return None
     finally:
         session.close()
 
@@ -119,14 +141,16 @@ def gerar_analise_visual(transacoes):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "**Jarvis**\n\n"
-        "**Novidade:** Defina metas de gastos!\n"
-        "Use: `/meta [categoria] [valor]`\n"
-        "Ex: `/meta Alimentacao 500`\n\n"
-        "Depois é só lançar os gastos normalmente."
+        "Seus dados são privados e vinculados ao seu Telegram ID.\n\n"
+        "Comandos:\n"
+        "👉 `/meta [categoria] [valor]`\n"
+        "👉 'Exportar planilha'\n"
+        "👉 Registre seus gastos normalmente."
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='Markdown')
 
 async def comando_definir_meta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     try:
         if len(context.args) < 2:
             await update.message.reply_text("Uso correto: /meta [Categoria] [Valor]")
@@ -135,8 +159,8 @@ async def comando_definir_meta(update: Update, context: ContextTypes.DEFAULT_TYP
         categoria = context.args[0].capitalize()
         valor = float(context.args[1].replace(',', '.'))
 
-        if definir_meta_db(categoria, valor):
-            await update.message.reply_text(f"🎯 Meta de {categoria} definida para R$ {valor:.2f}**!")
+        if definir_meta_db(categoria, valor, user_id):
+            await update.message.reply_text(f"🎯 Meta de {categoria} definida para R$ {valor:.2f}!")
         else:
             await update.message.reply_text("Erro ao salvar meta.")
             
@@ -145,6 +169,7 @@ async def comando_definir_meta(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     texto = update.message.text
     
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -161,10 +186,10 @@ async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE)
         dados = resultado["dados"]
         dados['categoria'] = dados['categoria'].capitalize()
         
-        sucesso = await loop.run_in_executor(None, salvar_transacao, dados)
+        sucesso = await loop.run_in_executor(None, salvar_transacao, dados, user_id)
         
         if sucesso:
-            alerta = await loop.run_in_executor(None, verificar_alertas, dados['categoria'])
+            alerta = await loop.run_in_executor(None, verificar_alertas, dados['categoria'], user_id)
             
             msg = (
                 f"✅ *Anotado!*\n\n"
@@ -175,15 +200,15 @@ async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"{alerta}"
             )
         else:
-            msg = "Erro ao salvar no banco."
+            msg = "❌ Erro ao salvar no banco."
         
         await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
 
     elif intencao == "resumo":
-        await context.bot.send_message(chat_id=chat_id, text="📊 Compilando dados...")
-        transacoes = await loop.run_in_executor(None, buscar_dados_relatorio)
+        await context.bot.send_message(chat_id=chat_id, text="📊 Compilando seus dados...")
+        transacoes = await loop.run_in_executor(None, buscar_dados_relatorio, user_id)
         if not transacoes:
-            await context.bot.send_message(chat_id=chat_id, text="Sem dados ainda!")
+            await context.bot.send_message(chat_id=chat_id, text="Você não tem dados registrados.")
             return
         
         total = sum(t.valor for t in transacoes)
@@ -191,6 +216,21 @@ async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         await context.bot.send_message(chat_id=chat_id, text=f"📉 **Total Gasto:** R$ {total:.2f}", parse_mode='Markdown')
         await context.bot.send_photo(chat_id=chat_id, photo=imagem)
+
+    elif intencao == "exportacao":
+        await context.bot.send_message(chat_id=chat_id, text="📂 Gerando sua planilha pessoal...")
+        
+        arquivo_excel = await loop.run_in_executor(None, gerar_arquivo_excel, user_id)
+        
+        if arquivo_excel:
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=arquivo_excel,
+                filename="meus_gastos.xlsx",
+                caption="Aqui estão apenas os seus registros! 📊"
+            )
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="Erro ao gerar arquivo.")
 
 if __name__ == '__main__':
     token = os.getenv("TELEGRAM_TOKEN")
