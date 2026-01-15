@@ -164,12 +164,11 @@ def gerar_dashboard_completo(transacoes):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "**Jarvis Seu Assistente Financeiro**\n\n"
-        "Agora com gráficos de Entradas e Saídas!\n\n"
-        "Comandos:\n"
-        "👉 `/meta [categoria] [valor]`\n"
-        "👉 'Exportar planilha'\n"
-        "👉 'Me dê um resumo'\n"
-        "👉 Registre: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'."
+        "Coisas que pode me pedir:\n"
+        "👉 `Para definir metas para você mesmo digite: /meta [categoria] [valor]`\n"
+        "👉 'Para exportar uma planilha digite: Exportar planilha'\n"
+        "👉 'Para obter um resumo digite: Me dê um resumo'\n"
+        "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'."
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='Markdown')
 
