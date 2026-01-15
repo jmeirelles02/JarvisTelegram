@@ -84,10 +84,10 @@ def verificar_alertas(categoria, user_id):
     finally:
         session.close()
 
-def buscar_dados_relatorio(user_id):
+def buscar_todas_transacoes(user_id):
     session = database.SessionLocal()
     try:
-        transacoes = session.query(models.Transacao).filter_by(user_id=user_id, tipo="Saida").all()
+        transacoes = session.query(models.Transacao).filter_by(user_id=user_id).all()
         return transacoes
     finally:
         session.close()
@@ -113,26 +113,49 @@ def gerar_arquivo_excel(user_id):
     finally:
         session.close()
 
-def gerar_analise_visual(transacoes):
+def gerar_dashboard_completo(transacoes):
     if not transacoes:
         return None
-    categorias = [t.categoria for t in transacoes]
-    metodos = [t.metodo_pagamento for t in transacoes]
-    contagem_cat = Counter(categorias)
-    contagem_met = Counter(metodos)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
-    fig.suptitle('Análise de Gastos do Jarvis', fontsize=16)
+    saidas = [t for t in transacoes if t.tipo == 'Saida']
+    entradas = [t for t in transacoes if t.tipo == 'Entrada']
 
-    ax1.bar(contagem_cat.keys(), contagem_cat.values(), color='#4CAF50')
-    ax1.set_title('Onde você mais gasta (Qtd)')
-    ax1.tick_params(axis='x', rotation=45)
+    cat_saida = Counter([t.categoria for t in saidas])
+    met_saida = Counter([t.metodo_pagamento for t in saidas])
+    cat_entrada = Counter([t.categoria for t in entradas])
+
+    total_saida = sum(t.valor for t in saidas)
+    total_entrada = sum(t.valor for t in entradas)
+
+    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Dashboard Financeiro do Jarvis', fontsize=20)
+
+    if saidas:
+        axs[0, 0].bar(cat_saida.keys(), cat_saida.values(), color='#ff6666')
+        axs[0, 0].set_title('Gastos por Categoria')
+        axs[0, 0].tick_params(axis='x', rotation=45)
+    else:
+        axs[0, 0].text(0.5, 0.5, 'Sem dados de Saída', ha='center')
+
+    if saidas:
+        axs[0, 1].pie(met_saida.values(), labels=met_saida.keys(), autopct='%1.1f%%', startangle=90)
+        axs[0, 1].set_title('Métodos de Pagamento (Gastos)')
+    else:
+        axs[0, 1].text(0.5, 0.5, 'Sem dados de Saída', ha='center')
+
+    if entradas:
+        axs[1, 0].bar(cat_entrada.keys(), cat_entrada.values(), color='#66b3ff')
+        axs[1, 0].set_title('Origem das Entradas')
+        axs[1, 0].tick_params(axis='x', rotation=45)
+    else:
+        axs[1, 0].text(0.5, 0.5, 'Sem dados de Entrada', ha='center')
+
+    axs[1, 1].bar(['Entradas', 'Saídas'], [total_entrada, total_saida], color=['green', 'red'])
+    axs[1, 1].set_title('Balanço Geral')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
-    ax2.pie(contagem_met.values(), labels=contagem_met.keys(), autopct='%1.1f%%', startangle=90)
-    ax2.set_title('Como você paga')
-
     buf = io.BytesIO()
-    plt.tight_layout()
     plt.savefig(buf, format='png')
     buf.seek(0)
     plt.close()
@@ -140,12 +163,13 @@ def gerar_analise_visual(transacoes):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "**Jarvis**\n\n"
-        "Seus dados são privados e vinculados ao seu Telegram ID.\n\n"
+        "**Jarvis Seu Assistente Financeiro**\n\n"
+        "Agora com gráficos de Entradas e Saídas!\n\n"
         "Comandos:\n"
         "👉 `/meta [categoria] [valor]`\n"
         "👉 'Exportar planilha'\n"
-        "👉 Registre seus gastos normalmente."
+        "👉 'Me dê um resumo'\n"
+        "👉 Registre: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'."
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='Markdown')
 
@@ -189,14 +213,17 @@ async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE)
         sucesso = await loop.run_in_executor(None, salvar_transacao, dados, user_id)
         
         if sucesso:
-            alerta = await loop.run_in_executor(None, verificar_alertas, dados['categoria'], user_id)
+            alerta = ""
+            if dados['tipo'] == 'Saida':
+                alerta = await loop.run_in_executor(None, verificar_alertas, dados['categoria'], user_id)
             
             msg = (
                 f"✅ *Anotado!*\n\n"
                 f"📝 *Item:* {dados['descricao']}\n"
                 f"💰 *Valor:* R$ {dados['valor']:.2f}\n"
                 f"📂 *Categoria:* {dados['categoria']}\n"
-                f"💳 *Método:* {dados['metodo_pagamento']}"
+                f"💳 *Método:* {dados['metodo_pagamento']}\n"
+                f"🔄 *Tipo:* {dados['tipo']}"
                 f"{alerta}"
             )
         else:
@@ -205,20 +232,31 @@ async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
 
     elif intencao == "resumo":
-        await context.bot.send_message(chat_id=chat_id, text="📊 Compilando seus dados...")
-        transacoes = await loop.run_in_executor(None, buscar_dados_relatorio, user_id)
+        await context.bot.send_message(chat_id=chat_id, text="📊 Gerando Dashboard Completo...")
+        transacoes = await loop.run_in_executor(None, buscar_todas_transacoes, user_id)
+        
         if not transacoes:
-            await context.bot.send_message(chat_id=chat_id, text="Você não tem dados registrados.")
+            await context.bot.send_message(chat_id=chat_id, text="Nenhum dado encontrado para gerar gráficos.")
             return
         
-        total = sum(t.valor for t in transacoes)
-        imagem = await loop.run_in_executor(None, gerar_analise_visual, transacoes)
+        total_entrada = sum(t.valor for t in transacoes if t.tipo == 'Entrada')
+        total_saida = sum(t.valor for t in transacoes if t.tipo == 'Saida')
+        saldo = total_entrada - total_saida
         
-        await context.bot.send_message(chat_id=chat_id, text=f"📉 **Total Gasto:** R$ {total:.2f}", parse_mode='Markdown')
+        imagem = await loop.run_in_executor(None, gerar_dashboard_completo, transacoes)
+        
+        msg_resumo = (
+            f"📉 **Resumo Financeiro**\n\n"
+            f"💸 **Total Recebido:** R$ {total_entrada:.2f}\n"
+            f"💳 **Total Gasto:** R$ {total_saida:.2f}\n"
+            f"💰 **Saldo Atual:** R$ {saldo:.2f}\n"
+        )
+
+        await context.bot.send_message(chat_id=chat_id, text=msg_resumo, parse_mode='Markdown')
         await context.bot.send_photo(chat_id=chat_id, photo=imagem)
 
     elif intencao == "exportacao":
-        await context.bot.send_message(chat_id=chat_id, text="📂 Gerando sua planilha pessoal...")
+        await context.bot.send_message(chat_id=chat_id, text="📂 Gerando planilha...")
         
         arquivo_excel = await loop.run_in_executor(None, gerar_arquivo_excel, user_id)
         
@@ -226,8 +264,8 @@ async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await context.bot.send_document(
                 chat_id=chat_id,
                 document=arquivo_excel,
-                filename="meus_gastos.xlsx",
-                caption="Aqui estão apenas os seus registros! 📊"
+                filename="financas_pessoais.xlsx",
+                caption="Seu extrato completo! 📊"
             )
         else:
             await context.bot.send_message(chat_id=chat_id, text="Erro ao gerar arquivo.")
