@@ -4,7 +4,7 @@ Bem-vindo ao **Jarvis**! Este projeto conecta o seu Telegram à inteligência do
 
 ## O que ele faz?
 
-* **Conversa Natural:** Bate um papo sobre qualquer assunto.
+* **Controle de Gastos:** Você envia uma mensagem falando em que você gastou e ele salva em um banco de dados.
 * **Visão Computacional:** Você manda uma foto e ele analisa o que tem nela.
 * **Audição:** Mandou um áudio? Ele escuta, entende e te responde (sem precisar transcrever manualmente).
 
