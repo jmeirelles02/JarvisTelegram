@@ -21,6 +21,8 @@ logging.basicConfig(
 
 load_dotenv()
 
+models.Base.metadata.create_all(bind=database.engine)
+
 def salvar_transacao(dados_ia, user_id):
     session = database.SessionLocal()
     try:
@@ -163,12 +165,14 @@ def gerar_dashboard_completo(transacoes):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "**Jarvis Seu Assistente Financeiro**\n\n"
+         "**Jarvis Seu Assistente Financeiro**\n\n"
         "Coisas que pode me pedir:\n"
         "👉 'Para definir metas para você mesmo digite: /meta [categoria] [valor]'\n"
         "👉 'Para exportar uma planilha digite: Exportar planilha'\n"
         "👉 'Para obter um resumo digite: Me dê um resumo'\n"
-        "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'."
+        "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'\n"
+        "👉 Envie uma Foto de um comprovante \n"
+        "👉 Envie um Áudio falando seu gasto "
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='Markdown')
 
@@ -190,14 +194,36 @@ async def comando_definir_meta(update: Update, context: ContextTypes.DEFAULT_TYP
     except ValueError:
         await update.message.reply_text("O valor deve ser um número (ex: 500 ou 500.50).")
 
-async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    texto = update.message.text
     
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    texto = None
+    arquivo_bytes = None
+    mime_type = None
+
+    if update.message.text:
+        texto = update.message.text
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    
+    elif update.message.photo:
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+        foto = await update.message.photo[-1].get_file()
+        byte_array = await foto.download_as_bytearray()
+        arquivo_bytes = bytes(byte_array)
+        mime_type = "image/jpeg"
+        texto = update.message.caption or "Analise este comprovante"
+
+    elif update.message.voice:
+        await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+        voz = await update.message.voice.get_file()
+        byte_array = await voz.download_as_bytearray()
+        arquivo_bytes = bytes(byte_array)
+        mime_type = "audio/ogg"
+        texto = "Transcreva o áudio e analise o gasto"
+
     loop = asyncio.get_running_loop()
-    resultado = await loop.run_in_executor(None, brain.interpretar_mensagem, texto)
+    resultado = await loop.run_in_executor(None, brain.interpretar_mensagem, texto, arquivo_bytes, mime_type)
 
     if not resultado:
         await context.bot.send_message(chat_id=chat_id, text="Não entendi. Tente ser mais claro.")
@@ -226,7 +252,7 @@ async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"{alerta}"
             )
         else:
-            msg = "❌ Erro ao salvar no banco."
+            msg = "Erro ao salvar no banco."
         
         await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
 
@@ -275,7 +301,10 @@ if __name__ == '__main__':
     
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('meta', comando_definir_meta))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), processar_mensagem))
+    
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), processar_entrada))
+    app.add_handler(MessageHandler(filters.PHOTO, processar_entrada))
+    app.add_handler(MessageHandler(filters.VOICE, processar_entrada))
     
     print("Jarvis seu assistente financeiro está online no telegram!")
     app.run_polling()
