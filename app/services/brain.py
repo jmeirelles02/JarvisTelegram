@@ -1,6 +1,5 @@
 import os
 import json
-import re
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -36,12 +35,11 @@ def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=No
     CENÁRIO 3: Exportação (ex: "planilha", "excel", "csv")
     Retorne: {"intencao": "exportacao"}
 
-    CENÁRIO 4: Ajuda/Capacidades (ex: "o que você faz?", "ajuda", "funções")
+    CENÁRIO 4: Ajuda/Capacidades (ex: "o que você faz?", "ajuda", "funções", "comandos")
     Retorne: {"intencao": "ajuda"}
 
     Se receber IMAGEM: Extraia o total, estabelecimento e data.
-    Se receber ÁUDIO: Transcreva o conteúdo. Se o áudio não for claro sobre gastos, retorne null.
-    IMPORTANTE: Retorne APENAS o JSON, sem markdown.
+    Se receber ÁUDIO: Transcreva e classifique.
     """
 
     conteudo = []
@@ -56,19 +54,12 @@ def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=No
 
     try:
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model="gemini-2.5-flash-preview-image",
             contents=conteudo
         )
         
-        print(f"Resposta Bruta da IA: {response.text}")
-
-        match = re.search(r"\{.*\}", response.text, re.DOTALL)
-        
-        if match:
-            json_str = match.group(0)
-            return json.loads(json_str)
-        else:
-            return None
+        texto_limpo = response.text.replace("```json", "").replace("```", "")
+        return json.loads(texto_limpo)
 
     except Exception as e:
         print(f"Erro na IA: {e}")

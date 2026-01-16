@@ -165,14 +165,14 @@ def gerar_dashboard_completo(transacoes):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-         "**Jarvis Seu Assistente Financeiro**\n\n"
+        "**Jarvis Seu Assistente Financeiro**\n\n"
         "Coisas que pode me pedir:\n"
         "👉 'Para definir metas para você mesmo digite: /meta [categoria] [valor]'\n"
         "👉 'Para exportar uma planilha digite: Exportar planilha'\n"
         "👉 'Para obter um resumo digite: Me dê um resumo'\n"
         "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'\n"
         "👉 Envie uma Foto de um comprovante \n"
-        "👉 Envie um Áudio falando seu gasto "
+        "👉 Envie um Áudio falando seu gasto " 
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='Markdown')
 
@@ -293,7 +293,24 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption="Seu extrato completo! 📊"
             )
         else:
-            await context.bot.send_message(chat_id=chat_id, text="Erro ao gerar arquivo.")
+            await context.bot.send_message(chat_id=chat_id, text="Erro ao exportar arquivo.")
+
+    elif intencao == "ajuda":
+        msg_ajuda = (
+            "**Minhas Funcionalidades:**\n\n"
+            "1️⃣ **Registrar Transações:**\n"
+            "   📝 Texto: 'Gastei 50 no mercado'\n"
+            "   📸 Foto: Envie comprovante\n"
+            "   🎙️ Áudio: Fale seu gasto\n\n"
+            "2️⃣ **Gestão de Metas:**\n"
+            "   🎯 Use `/meta [Categoria] [Valor]`\n"
+            "   Ex: `/meta Alimentacao 500`\n\n"
+            "3️⃣ **Análises:**\n"
+            "   📊 Peça: 'Me dê um resumo' para ver gráficos e saldo\n\n"
+            "4️⃣ **Exportação:**\n"
+            "   📂 Peça: 'Exportar planilha' para receber o Excel"
+        )
+        await context.bot.send_message(chat_id=chat_id, text=msg_ajuda, parse_mode='Markdown')
 
 if __name__ == '__main__':
     token = os.getenv("TELEGRAM_TOKEN")
