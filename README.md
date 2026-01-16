@@ -18,29 +18,33 @@ Siga estes passos simples para colocar o Jarvis de pé.
 Primeiro, baixe o projeto e entre na pasta. Depois, para manter tudo organizado, crie e ative seu ambiente virtual:
 
 **No Windows:**
-```powershell
+```
+powershell
 python -m venv venv
 .\venv\Scripts\activate
+```
 2. Instalando as dependências
 Com o ambiente ativado, você só precisa rodar um comando para instalar tudo o que o robô precisa (Google Gemini, Telegram Bot, etc):
-
+```
 Bash
 pip install -r requirements.txt
+```
 3. Configurando as chaves (Segurança)
 O bot precisa das chaves de acesso para funcionar. Crie um arquivo chamado .env na raiz do projeto e cole suas credenciais lá dentro:
-
-Code snippet
+```
 GEMINI_API_KEY=sua_chave_do_google_aqui
 TELEGRAM_TOKEN=seu_token_do_telegram_aqui
+```
 4. Ligando o robô
 Tudo pronto! Agora é só iniciar o script principal:
-
+```
 Bash
-python main.py
+python run_bot.py
+```
 🛠️ Estrutura dos Arquivos
-main.py: O cérebro do bot.
+brain.py: O cérebro do bot.
 
-list_models.py: Um script extra para você ver quais versões do Gemini estão disponíveis na sua conta.
+run_bot.py: o coração do bot.
 
 requirements.txt: Lista de tudo que precisa ser instalado.
 
