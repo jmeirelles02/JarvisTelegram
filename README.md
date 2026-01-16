@@ -9,7 +9,13 @@ Bem-vindo ao **Jarvis**! Este projeto conecta o seu Telegram à inteligência do
 * **Audição:** Mandou um áudio? Ele escuta, entende e te responde (sem precisar transcrever manualmente).
 
 ---
+## ☁️ Quer usar sem instalar nada?
 
+Se você não quer rodar o código na sua máquina e só quer testar o bot funcionando agora mesmo, é só clicar no link abaixo:
+
+👉 **[Acessar Jarvis na Nuvem](https://t.me/JarvisFinancial_Bot)**
+
+---
 ## Como rodar o projeto
 
 Siga estes passos simples para colocar o Jarvis de pé.
