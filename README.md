@@ -1,59 +1,75 @@
-# Jarvis Telegram 
+## Visão Geral do Projeto
 
-Bem-vindo ao **Jarvis**! Este projeto conecta o seu Telegram à inteligência do Google Gemini. A ideia é ter um assistente pessoal capaz de "ver" suas imagens, "ouvir" seus áudios e conversar com você naturalmente, tudo direto pelo chat.
+O Jarvis é um bot de Telegram desenvolvido em Python, projetado para simplificar a gestão financeira pessoal. Diferente de aplicativos tradicionais que exigem inserção manual de dados em formulários, o Jarvis utiliza LLM para interpretar linguagem natural.
 
-## O que ele faz?
+O sistema é capaz de processar entradas multimodais (texto, áudio e imagem), convertendo dados não estruturados em registros financeiros organizados em um banco de dados relacional.
 
-* **Controle de Gastos:** Você envia uma mensagem falando em que você gastou e ele salva em um banco de dados.
-* **Visão Computacional:** Você manda uma foto e ele analisa o que tem nela.
-* **Audição:** Mandou um áudio? Ele escuta, entende e te responde (sem precisar transcrever manualmente).
+## Arquitetura do Sistema
 
----
-## ☁️ Quer usar sem instalar nada?
+O projeto segue uma arquitetura baseada em eventos, onde o bot atua como interface entre o usuário e os serviços de processamento.
 
-Se você não quer rodar o código na sua máquina e só quer testar o bot funcionando agora mesmo, é só clicar no link abaixo:
+### Fluxo de Dados
 
-👉 **[Acessar Jarvis na Nuvem](https://t.me/JarvisFinancial_Bot)**
+1. **Entrada:** O usuário envia uma mensagem via Telegram. Pode ser texto ("Gastei 50 reais no almoço"), uma foto de um comprovante fiscal ou um áudio descrevendo um gasto.
+2. **Processamento (Backend Python):** O script principal recebe o objeto `Update` da API do Telegram.
+3. **Interpretação (AI Layer):**
+* Se for **Texto**, é enviado diretamente ao modelo Gemini.
+* Se for **Áudio/Imagem**, o arquivo é baixado temporariamente em memória (bytes) e enviado para a API do Gemini.
+* O modelo Gemini 2.5 Flash analisa o conteúdo e retorna um JSON estruturado contendo: `valor`, `categoria`, `descrição`, `método de pagamento` e `tipo` (Entrada/Saída).
 
----
-## Como rodar o projeto
 
-Siga estes passos simples para colocar o Jarvis de pé.
+4. **Persistência:** Os dados estruturados são validados e salvos em um banco de dados no NeonDB utilizando o ORM SQLAlchemy.
+5. **Visualização:** Quando solicitado, o sistema consulta o banco de dados, utiliza a biblioteca Pandas para manipular os dados e Matplotlib para gerar gráficos estáticos, que são enviados de volta ao usuário como imagem.
 
-### 1. Preparando o ambiente
-Primeiro, baixe o projeto e entre na pasta. Depois, para manter tudo organizado, crie e ative seu ambiente virtual:
+## Stacks
 
-**No Windows:**
-```
-powershell
-python -m venv venv
-.\venv\Scripts\activate
-```
-2. Instalando as dependências
-Com o ambiente ativado, você só precisa rodar um comando para instalar tudo o que o robô precisa (Google Gemini, Telegram Bot, etc):
-```
-Bash
-pip install -r requirements.txt
-```
-3. Configurando as chaves (Segurança)
-O bot precisa das chaves de acesso para funcionar. Crie um arquivo chamado .env na raiz do projeto e cole suas credenciais lá dentro:
-```
-GEMINI_API_KEY=sua_chave_do_google_aqui
-TELEGRAM_TOKEN=seu_token_do_telegram_aqui
-```
-4. Ligando o robô
-Tudo pronto! Agora é só iniciar o script principal:
-```
-Bash
-python run_bot.py
-```
-🛠️ Estrutura dos Arquivos
-brain.py: O cérebro do bot.
+As tecnologias foram escolhidas visando baixo custo de operação, facilidade de manutenção e alta performance para um usuário único.
 
-run_bot.py: o coração do bot.
+* **Linguagem:** Python
+* **Interface:** Telegram Bot API
+* **Inteligência Artificial:** Google Gemini 2.5 Flash
+* **Banco de Dados:** NeonDB
+* **ORM:** SQLAlchemy
+* **Análise de Dados:** Pandas e Matplotlib
 
-requirements.txt: Lista de tudo que precisa ser instalado.
+## Funcionalidades Principais
 
-.env: Onde seus segredos (senhas) ficam guardados.
+### 1. Registro Multimodal
 
-Divirta-se conversando com seu novo assistente!
+O sistema aceita inputs variados, reduzindo o atrito do usuário ao registrar gastos. A IA é instruída via *System Prompt* a extrair sempre os mesmos campos chaves, independentemente do formato da entrada.
+
+### 2. Dashboard Mensal Dinâmico
+
+O bot gera relatórios visuais sob demanda. A lógica de filtragem foi implementada para isolar transações baseadas no mês e ano correntes, garantindo que o usuário tenha uma visão atualizada da sua saúde financeira.
+
+### 3. Sistema de Metas e Alertas
+
+O usuário pode definir tetos de gastos por categoria. O sistema verifica, a cada nova transação de saída, se o valor acumulado no mês ultrapassou a meta definida, emitindo alertas proativos.
+
+### 4. Exportação de Dados
+
+Para análises mais profundas, o sistema permite a exportação integral do banco de dados para um arquivo Excel (.xlsx), formatado automaticamente com colunas de data e valores monetários.
+
+## Estrutura do Banco de Dados
+
+O banco de dados possui, principalmente, a tabela `transacoes` com a seguinte estrutura simplificada:
+
+* **id:** Inteiro (Chave Primária)
+* **user_id:** Inteiro (Identificador do Telegram)
+* **valor:** Float (Valor monetário)
+* **descricao:** Texto (Detalhe do gasto)
+* **categoria:** Texto (Ex: Alimentação, Transporte)
+* **tipo:** Texto (Entrada ou Saída)
+* **metodo_pagamento:** Texto (Ex: Crédito, Pix)
+* **data:** DateTime (Timestamp do registro)
+
+## Instalação e Execução
+
+O projeto utiliza um ambiente virtual para gerenciamento de dependências.
+
+1. Clonar o repositório.
+2. Criar o arquivo .env na raiz do projeto.
+3. Configurar as variáveis de ambiente no arquivo `.env` (`TELEGRAM_TOKEN` e `GEMINI_API_KEY`).
+4. Instalar dependências: `pip install -r requirements.txt`.
+5. Inicializar o banco: `python models.py`.
+6. Executar o bot: `python run_bot.py`.
