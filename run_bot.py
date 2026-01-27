@@ -94,6 +94,21 @@ def buscar_todas_transacoes(user_id):
     finally:
         session.close()
 
+        def buscar_transacoes_mes_atual(user_id):
+    session = database.SessionLocal()
+    try:
+        mes_atual = datetime.now().month
+        ano_atual = datetime.now().year
+        
+        transacoes = session.query(models.Transacao).filter(
+            models.Transacao.user_id == user_id,
+            extract('month', models.Transacao.data) == mes_atual,
+            extract('year', models.Transacao.data) == ano_atual
+        ).all()
+        return transacoes
+    finally:
+        session.close()
+
 def gerar_arquivo_excel(user_id):
     session = database.SessionLocal()
     try:
@@ -256,12 +271,14 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
 
-    elif intencao == "resumo":
-        await context.bot.send_message(chat_id=chat_id, text="📊 Gerando Dashboard Completo...")
-        transacoes = await loop.run_in_executor(None, buscar_todas_transacoes, user_id)
+elif intencao == "resumo":
+        mes_nome = datetime.now().strftime("%B/%Y")
+        await context.bot.send_message(chat_id=chat_id, text=f"📊 Gerando Dashboard de {mes_nome}...")
+        
+        transacoes = await loop.run_in_executor(None, buscar_transacoes_mes_atual, user_id)
         
         if not transacoes:
-            await context.bot.send_message(chat_id=chat_id, text="Nenhum dado encontrado para gerar gráficos.")
+            await context.bot.send_message(chat_id=chat_id, text=f"Nenhum dado encontrado neste mês ({mes_nome}).")
             return
         
         total_entrada = sum(t.valor for t in transacoes if t.tipo == 'Entrada')
@@ -271,10 +288,10 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
         imagem = await loop.run_in_executor(None, gerar_dashboard_completo, transacoes)
         
         msg_resumo = (
-            f"📉 **Resumo Financeiro**\n\n"
-            f"💸 **Total Recebido:** R$ {total_entrada:.2f}\n"
-            f"💳 **Total Gasto:** R$ {total_saida:.2f}\n"
-            f"💰 **Saldo Atual:** R$ {saldo:.2f}\n"
+            f"📉 **Resumo Mensal ({mes_nome})**\n\n"
+            f"💸 **Recebido:** R$ {total_entrada:.2f}\n"
+            f"💳 **Gasto:** R$ {total_saida:.2f}\n"
+            f"💰 **Saldo do Mês:** R$ {saldo:.2f}\n"
         )
 
         await context.bot.send_message(chat_id=chat_id, text=msg_resumo, parse_mode='Markdown')
