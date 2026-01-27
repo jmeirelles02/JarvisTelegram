@@ -54,7 +54,7 @@ def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=No
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.5-flash",
             contents=conteudo
         )
         
