@@ -94,7 +94,7 @@ def buscar_todas_transacoes(user_id):
     finally:
         session.close()
 
-        def buscar_transacoes_mes_atual(user_id):
+def buscar_transacoes_mes_atual(user_id):
     session = database.SessionLocal()
     try:
         mes_atual = datetime.now().month
