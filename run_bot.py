@@ -271,7 +271,7 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
 
-elif intencao == "resumo":
+    elif intencao == "resumo":
         mes_nome = datetime.now().strftime("%B/%Y")
         await context.bot.send_message(chat_id=chat_id, text=f"📊 Gerando Dashboard de {mes_nome}...")
         
