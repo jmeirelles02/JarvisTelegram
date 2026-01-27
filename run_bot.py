@@ -272,7 +272,14 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
 
     elif intencao == "resumo":
-        mes_nome = datetime.now().strftime("%B/%Y")
+        meses_pt = {
+            1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril',
+            5: 'Maio', 6: 'Junho', 7: 'Julho', 8: 'Agosto',
+            9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'
+        }
+        hoje = datetime.now()
+        mes_nome = f"{meses_pt[hoje.month]}/{hoje.year}"
+
         await context.bot.send_message(chat_id=chat_id, text=f"📊 Gerando Dashboard de {mes_nome}...")
         
         transacoes = await loop.run_in_executor(None, buscar_transacoes_mes_atual, user_id)
@@ -320,8 +327,8 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "   📸 Foto: Envie comprovante\n"
             "   🎙️ Áudio: Fale seu gasto\n\n"
             "2️⃣ **Gestão de Metas:**\n"
-            "   🎯 Use `/meta [Categoria] [Valor]`\n"
-            "   Ex: `/meta Alimentacao 500`\n\n"
+            "   🎯 Use /meta [Categoria] [Valor]\n"
+            "   Ex: /meta Alimentacao 500\n\n"
             "3️⃣ **Análises:**\n"
             "   📊 Peça: 'Me dê um resumo' para ver gráficos e saldo\n\n"
             "4️⃣ **Exportação:**\n"
