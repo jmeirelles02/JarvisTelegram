@@ -4,6 +4,8 @@ O Jarvis é um bot de Telegram desenvolvido em Python, projetado para simplifica
 
 O sistema é capaz de processar entradas multimodais (texto, áudio e imagem), convertendo dados não estruturados em registros financeiros organizados em um banco de dados relacional.
 
+**[Acessar Jarvis na Nuvem](https://t.me/JarvisFinancial_Bot)**
+
 ## Arquitetura do Sistema
 
 O projeto segue uma arquitetura baseada em eventos, onde o bot atua como interface entre o usuário e os serviços de processamento.
@@ -62,8 +64,6 @@ O banco de dados possui, principalmente, a tabela `transacoes` com a seguinte es
 * **tipo:** Texto (Entrada ou Saída)
 * **metodo_pagamento:** Texto (Ex: Crédito, Pix)
 * **data:** DateTime (Timestamp do registro)
-
-**[Acessar Jarvis na Nuvem](https://t.me/JarvisFinancial_Bot)**
 
 ## Instalação e Execução
 
