@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from sqlalchemy import func, extract
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-
+from web_alive import manter_vivo
 from app.services import brain
 from app import models, database
 
@@ -348,4 +348,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.VOICE, processar_entrada))
     
     print("Jarvis seu assistente financeiro está online no telegram!")
+    manter_vivo()
     app.run_polling()
