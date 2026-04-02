@@ -1,10 +1,13 @@
 import os
 import json
+import logging
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=None):
     api_key = os.getenv("GEMINI_API_KEY")
@@ -57,6 +60,19 @@ def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=No
             model="gemini-2.5-flash",
             contents=conteudo
         )
+        
+        # Log de uso de tokens
+        usage = getattr(response, 'usage_metadata', None)
+        if usage:
+            prompt_tokens = getattr(usage, 'prompt_token_count', 0)
+            candidates_tokens = getattr(usage, 'candidates_token_count', 0)
+            total_tokens = getattr(usage, 'total_token_count', 0)
+            logger.info(
+                "📊 Tokens usados -> Prompt: %d | Resposta: %d | Total: %d",
+                prompt_tokens, candidates_tokens, total_tokens
+            )
+        else:
+            logger.info("📊 Informação de tokens não disponível nesta resposta.")
         
         texto_limpo = response.text.replace("```json", "").replace("```", "")
         return json.loads(texto_limpo)
