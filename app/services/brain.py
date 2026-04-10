@@ -78,5 +78,5 @@ def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=No
         return json.loads(texto_limpo)
 
     except Exception as e:
-        print(f"Erro na IA: {e}")
-        return None
+        logger.error(f"Erro na IA: {e}")
+        return {"intencao": "erro_api"}

@@ -246,6 +246,13 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     intencao = resultado.get("intencao")
 
+    if intencao == "erro_api":
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text="Desculpe, o serviço de inteligência artificial da Google (Gemini) está temporariamente indisponível (Erro 503). Tente novamente em alguns minutos."
+        )
+        return
+
     if intencao == "transacao":
         dados = resultado["dados"]
         dados['categoria'] = dados['categoria'].capitalize()
