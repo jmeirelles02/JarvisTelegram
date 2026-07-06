@@ -12,6 +12,18 @@ class Transacao(Base):
     tipo = Column(String)
     data = Column(DateTime(timezone=True), server_default=func.now())
 
+class Parcelamento(Base):
+    __tablename__ = "parcelamentos"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(BigInteger, index=True)
+    descricao = Column(String)
+    valor_parcela = Column(Float)
+    categoria = Column(String)
+    metodo_pagamento = Column(String)
+    parcelas_total = Column(Integer)
+    parcelas_pagas = Column(Integer, default=1)
+    proxima_data = Column(DateTime(timezone=True))
+
 class Meta(Base):
     __tablename__ = "metas"
     id = Column(Integer, primary_key=True, index=True)

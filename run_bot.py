@@ -3,9 +3,11 @@ import logging
 import asyncio
 import io
 import matplotlib.pyplot as plt
+
+plt.rcParams['text.parse_math'] = False  # sem isso, "R$ x ... R$ y" vira fórmula matemática
 import pandas as pd
 from datetime import datetime
-from collections import Counter
+from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from sqlalchemy import func, extract
 from telegram import Update
@@ -37,6 +39,103 @@ def salvar_transacao(dados_ia, user_id):
     finally:
         session.close()
 
+def criar_parcelamento(dados, parcelas, user_id):
+    session = database.SessionLocal()
+    try:
+        parc = models.Parcelamento(
+            user_id=user_id,
+            descricao=dados['descricao'],
+            valor_parcela=dados['valor'],
+            categoria=dados['categoria'],
+            metodo_pagamento=dados['metodo_pagamento'],
+            parcelas_total=parcelas,
+            parcelas_pagas=1,
+            proxima_data=datetime.now() + relativedelta(months=1),
+        )
+        session.add(parc)
+        session.commit()
+        return True
+    except Exception as e:
+        print(f"Erro ao criar parcelamento: {e}")
+        return False
+    finally:
+        session.close()
+
+def listar_parcelamentos(user_id):
+    session = database.SessionLocal()
+    try:
+        return session.query(models.Parcelamento).filter_by(user_id=user_id).all()
+    finally:
+        session.close()
+
+def cancelar_parcelamento(parc_id, user_id):
+    session = database.SessionLocal()
+    try:
+        parc = session.query(models.Parcelamento).filter_by(id=parc_id, user_id=user_id).first()
+        if not parc:
+            return None
+        descricao = parc.descricao
+        session.delete(parc)
+        session.commit()
+        return descricao
+    except Exception as e:
+        print(f"Erro ao cancelar parcelamento: {e}")
+        return None
+    finally:
+        session.close()
+
+def processar_parcelas_devidas():
+    """Registra as parcelas que venceram e devolve os avisos [(user_id, msg)]."""
+    session = database.SessionLocal()
+    avisos = []
+    try:
+        devidas = session.query(models.Parcelamento).filter(
+            models.Parcelamento.proxima_data <= datetime.now()
+        ).all()
+        for parc in devidas:
+            parc.parcelas_pagas += 1
+            session.add(models.Transacao(
+                user_id=parc.user_id,
+                descricao=f"{parc.descricao} (parcela {parc.parcelas_pagas}/{parc.parcelas_total})",
+                valor=parc.valor_parcela,
+                categoria=parc.categoria,
+                metodo_pagamento=parc.metodo_pagamento,
+                tipo='Saida',
+            ))
+            msg = (
+                f"📆 *Parcela do mês registrada!*\n\n"
+                f"📝 {parc.descricao} — parcela {parc.parcelas_pagas}/{parc.parcelas_total}\n"
+                f"💰 R$ {parc.valor_parcela:.2f}"
+            )
+            if parc.parcelas_pagas >= parc.parcelas_total:
+                msg += "\n\n✅ Essa foi a última parcela! Parcelamento concluído."
+                session.delete(parc)
+            else:
+                parc.proxima_data = parc.proxima_data + relativedelta(months=1)
+            avisos.append((parc.user_id, msg))
+        session.commit()
+        return avisos
+    except Exception as e:
+        print(f"Erro ao processar parcelas: {e}")
+        return []
+    finally:
+        session.close()
+
+async def vigiar_parcelas(app):
+    # ponytail: checagem a cada 6h basta para aviso mensal e faz catch-up após restart
+    loop = asyncio.get_running_loop()
+    while True:
+        avisos = await loop.run_in_executor(None, processar_parcelas_devidas)
+        for user_id, msg in avisos:
+            try:
+                await app.bot.send_message(chat_id=user_id, text=msg, parse_mode='Markdown')
+            except Exception as e:
+                print(f"Erro ao enviar aviso de parcela: {e}")
+        await asyncio.sleep(6 * 3600)
+
+async def iniciar_tarefas(app):
+    asyncio.create_task(vigiar_parcelas(app))
+
 def definir_meta_db(categoria, valor, user_id):
     session = database.SessionLocal()
     try:
@@ -54,35 +153,54 @@ def definir_meta_db(categoria, valor, user_id):
     finally:
         session.close()
 
-def verificar_alertas(categoria, user_id):
+def _barra_progresso(pct):
+    cheios = min(10, int(round(pct / 10)))
+    return "▰" * cheios + "▱" * (10 - cheios)
+
+def progresso_meta(categoria, user_id):
+    """Linha visual do progresso da meta da categoria; '' se não houver meta."""
     session = database.SessionLocal()
     try:
         meta = session.query(models.Meta).filter_by(categoria=categoria, user_id=user_id).first()
-        if not meta:
+        if not meta or not meta.valor_limite:
             return ""
 
-        mes_atual = datetime.now().month
-        ano_atual = datetime.now().year
-        
+        agora = datetime.now()
         total_gasto = session.query(func.sum(models.Transacao.valor)).filter(
             models.Transacao.user_id == user_id,
             models.Transacao.categoria == categoria,
             models.Transacao.tipo == 'Saida',
-            extract('month', models.Transacao.data) == mes_atual,
-            extract('year', models.Transacao.data) == ano_atual
+            extract('month', models.Transacao.data) == agora.month,
+            extract('year', models.Transacao.data) == agora.year
         ).scalar() or 0.0
 
-        porcentagem = (total_gasto / meta.valor_limite) * 100
-        
-        if porcentagem >= 100:
-            return f"\n\n🚨 **ALERTA VERMELHO:** Você estourou sua meta de {categoria}! ({porcentagem:.1f}%)"
-        elif porcentagem >= 80:
-            return f"\n\n⚠️ **Atenção:** Você já usou {porcentagem:.1f}% da meta de {categoria}."
-        
-        return ""
+        pct = (total_gasto / meta.valor_limite) * 100
+
+        if pct >= 100:
+            emoji = "🔴"
+            aviso = f"\n🚨 Meta estourada em {_fmt_reais(total_gasto - meta.valor_limite)}!"
+        elif pct >= 80:
+            emoji = "🟠"
+            aviso = f"\n⚠️ Quase no limite — restam {_fmt_reais(meta.valor_limite - total_gasto)}"
+        else:
+            emoji = "🟢"
+            aviso = ""
+
+        return (
+            f"\n\n{emoji} *Meta de {categoria}:* {pct:.0f}%\n"
+            f"{_barra_progresso(pct)}\n"
+            f"{_fmt_reais(total_gasto)} de {_fmt_reais(meta.valor_limite)}{aviso}"
+        )
     except Exception as e:
-        print(f"Erro ao verificar alertas: {e}")
+        print(f"Erro ao verificar meta: {e}")
         return ""
+    finally:
+        session.close()
+
+def buscar_metas(user_id):
+    session = database.SessionLocal()
+    try:
+        return session.query(models.Meta).filter_by(user_id=user_id).all()
     finally:
         session.close()
 
@@ -130,50 +248,132 @@ def gerar_arquivo_excel(user_id):
     finally:
         session.close()
 
-def gerar_dashboard_completo(transacoes):
+# Paleta validada (CVD-safe): azul p/ saídas, aqua p/ entradas, vermelho só p/ saldo negativo
+COR_SAIDA = '#2a78d6'
+COR_ENTRADA = '#1baf7a'
+COR_FUNDO = '#fcfcfb'
+COR_TEXTO = '#0b0b0b'
+COR_TEXTO_2 = '#52514e'
+COR_MUTED = '#898781'
+COR_GRADE = '#e1e0d9'
+COR_TRILHO = '#f0efec'
+# Cores de status (reservadas p/ metas, nunca p/ séries)
+STATUS_BOM = '#0ca30c'
+STATUS_ALERTA = '#ec835a'
+STATUS_CRITICO = '#d03b3b'
+COR_SALDO_POSITIVO = '#006300'
+
+def _fmt_reais(valor):
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+def _somar_por(transacoes, atributo):
+    somas = {}
+    for t in transacoes:
+        chave = getattr(t, atributo) or "Outros"
+        somas[chave] = somas.get(chave, 0) + t.valor
+    # crescente: no barh o último item fica no topo, então o maior valor fica em cima
+    return dict(sorted(somas.items(), key=lambda kv: kv[1]))
+
+def _preparar_eixo(ax, titulo):
+    ax.set_facecolor(COR_FUNDO)
+    ax.set_title(titulo, loc='left', fontsize=15, color=COR_TEXTO, pad=12, fontweight='bold')
+    for lado in ('top', 'right'):
+        ax.spines[lado].set_visible(False)
+    for lado in ('left', 'bottom'):
+        ax.spines[lado].set_color(COR_GRADE)
+    ax.tick_params(colors=COR_MUTED, labelsize=12)
+
+def _barras_horizontais(ax, somas, cor, com_percentual=False):
+    total = sum(somas.values()) or 1
+    valores = list(somas.values())
+    barras = ax.barh(list(somas.keys()), valores, color=cor, height=0.55)
+    if com_percentual:
+        rotulos = [f"{_fmt_reais(v)}  ({v / total:.0%})" for v in valores]
+    else:
+        rotulos = [_fmt_reais(v) for v in valores]
+    ax.bar_label(barras, labels=rotulos, padding=5, fontsize=11, color=COR_TEXTO)
+    ax.set_xlim(0, max(valores) * 1.5)  # folga para os rótulos
+    ax.xaxis.set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.tick_params(axis='y', labelcolor=COR_TEXTO_2, labelsize=12)
+
+def _painel_hero(ax, total_entrada, total_saida, saldo, titulo):
+    ax.axis('off')
+    cor_saldo = COR_SALDO_POSITIVO if saldo >= 0 else STATUS_CRITICO
+    ax.text(0.5, 0.98, titulo, ha='center', va='top', fontsize=16, color=COR_TEXTO, fontweight='bold')
+    ax.text(0.5, 0.68, 'Saldo do mês', ha='center', va='top', fontsize=12, color=COR_MUTED)
+    ax.text(0.5, 0.52, _fmt_reais(saldo), ha='center', va='top', fontsize=34,
+            color=cor_saldo, fontweight='bold')
+    ax.text(0.5, 0.02, f"↑ Recebido {_fmt_reais(total_entrada)}      ↓ Gasto {_fmt_reais(total_saida)}",
+            ha='center', va='bottom', fontsize=13, color=COR_TEXTO_2)
+
+def _painel_metas(ax, metas, gasto_por_categoria):
+    nomes, fracoes, cores, pcts = [], [], [], []
+    for meta in metas:
+        gasto = gasto_por_categoria.get(meta.categoria, 0.0)
+        pct = (gasto / meta.valor_limite * 100) if meta.valor_limite else 0
+        nomes.append(f"{meta.categoria}\n{_fmt_reais(gasto)} / {_fmt_reais(meta.valor_limite)}")
+        fracoes.append(min(pct, 100) / 100)
+        cores.append(STATUS_CRITICO if pct >= 100 else STATUS_ALERTA if pct >= 80 else STATUS_BOM)
+        pcts.append(pct)
+
+    posicoes = list(range(len(metas)))
+    ax.barh(posicoes, [1] * len(metas), color=COR_TRILHO, height=0.45)
+    ax.barh(posicoes, fracoes, color=cores, height=0.45)
+    for pos, pct, cor in zip(posicoes, pcts, cores):
+        ax.text(1.04, pos, f"{pct:.0f}%", va='center', fontsize=13, color=cor, fontweight='bold')
+
+    ax.set_yticks(posicoes)
+    ax.set_yticklabels(nomes, fontsize=11)
+    ax.tick_params(axis='y', labelcolor=COR_TEXTO_2)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1.28)
+    ax.xaxis.set_visible(False)
+    for lado in ('bottom', 'left'):
+        ax.spines[lado].set_visible(False)
+
+def gerar_dashboard_completo(transacoes, metas=None, titulo='Dashboard Financeiro'):
     if not transacoes:
         return None
 
+    metas = metas or []
     saidas = [t for t in transacoes if t.tipo == 'Saida']
     entradas = [t for t in transacoes if t.tipo == 'Entrada']
-
-    cat_saida = Counter([t.categoria for t in saidas])
-    met_saida = Counter([t.metodo_pagamento for t in saidas])
-    cat_entrada = Counter([t.categoria for t in entradas])
-
     total_saida = sum(t.valor for t in saidas)
     total_entrada = sum(t.valor for t in entradas)
+    saldo = total_entrada - total_saida
+    gasto_por_categoria = _somar_por(saidas, 'categoria')
 
-    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle('Dashboard Financeiro do Jarvis', fontsize=20)
-
+    # Painéis empilhados na vertical: formato retrato lê melhor no celular
+    paineis = [(1.7, lambda ax: _painel_hero(ax, total_entrada, total_saida, saldo, titulo))]
+    if metas:
+        paineis.append((0.8 + 0.8 * len(metas), lambda ax: (
+            _preparar_eixo(ax, 'Metas do mês'),
+            _painel_metas(ax, metas, gasto_por_categoria))))
     if saidas:
-        axs[0, 0].bar(cat_saida.keys(), cat_saida.values(), color='#ff6666')
-        axs[0, 0].set_title('Gastos por Categoria')
-        axs[0, 0].tick_params(axis='x', rotation=45)
-    else:
-        axs[0, 0].text(0.5, 0.5, 'Sem dados de Saída', ha='center')
-
-    if saidas:
-        axs[0, 1].pie(met_saida.values(), labels=met_saida.keys(), autopct='%1.1f%%', startangle=90)
-        axs[0, 1].set_title('Métodos de Pagamento (Gastos)')
-    else:
-        axs[0, 1].text(0.5, 0.5, 'Sem dados de Saída', ha='center')
-
+        met_pagamento = _somar_por(saidas, 'metodo_pagamento')
+        paineis.append((0.8 + 0.6 * len(gasto_por_categoria), lambda ax: (
+            _preparar_eixo(ax, 'Gastos por categoria'),
+            _barras_horizontais(ax, gasto_por_categoria, COR_SAIDA))))
+        paineis.append((0.8 + 0.6 * len(met_pagamento), lambda ax: (
+            _preparar_eixo(ax, 'Gastos por método de pagamento'),
+            _barras_horizontais(ax, met_pagamento, COR_SAIDA, com_percentual=True))))
     if entradas:
-        axs[1, 0].bar(cat_entrada.keys(), cat_entrada.values(), color='#66b3ff')
-        axs[1, 0].set_title('Origem das Entradas')
-        axs[1, 0].tick_params(axis='x', rotation=45)
-    else:
-        axs[1, 0].text(0.5, 0.5, 'Sem dados de Entrada', ha='center')
+        origem_entradas = _somar_por(entradas, 'categoria')
+        paineis.append((0.8 + 0.6 * len(origem_entradas), lambda ax: (
+            _preparar_eixo(ax, 'Entradas por origem'),
+            _barras_horizontais(ax, origem_entradas, COR_ENTRADA))))
 
-    axs[1, 1].bar(['Entradas', 'Saídas'], [total_entrada, total_saida], color=['green', 'red'])
-    axs[1, 1].set_title('Balanço Geral')
+    alturas = [altura for altura, _ in paineis]
+    fig = plt.figure(figsize=(8.5, sum(alturas) + 0.55 * len(paineis)))
+    fig.patch.set_facecolor(COR_FUNDO)
+    grade = fig.add_gridspec(len(paineis), 1, height_ratios=alturas, hspace=0.55,
+                             left=0.22, right=0.94, top=0.97, bottom=0.03)
+    for indice, (_, desenhar) in enumerate(paineis):
+        desenhar(fig.add_subplot(grade[indice]))
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    
     buf = io.BytesIO()
-    plt.savefig(buf, format='png')
+    plt.savefig(buf, format='png', facecolor=COR_FUNDO, dpi=110)
     buf.seek(0)
     plt.close()
     return buf
@@ -186,8 +386,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👉 'Para exportar uma planilha digite: Exportar planilha'\n"
         "👉 'Para obter um resumo digite: Me dê um resumo'\n"
         "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'\n"
+        "👉 Compra parcelada? Diga: 'Comprei uma TV em 10x de 200' — registro e aviso todo mês\n"
+        "👉 Veja seus parcelamentos com /parcelas\n"
         "👉 Envie uma Foto de um comprovante \n"
-        "👉 Envie um Áudio falando seu gasto " 
+        "👉 Envie um Áudio falando seu gasto "
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='Markdown')
 
@@ -208,6 +410,42 @@ async def comando_definir_meta(update: Update, context: ContextTypes.DEFAULT_TYP
             
     except ValueError:
         await update.message.reply_text("O valor deve ser um número (ex: 500 ou 500.50).")
+
+async def comando_parcelas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    loop = asyncio.get_running_loop()
+    parcelamentos = await loop.run_in_executor(None, listar_parcelamentos, user_id)
+
+    if not parcelamentos:
+        await update.message.reply_text(
+            "Nenhum parcelamento ativo.\nPara criar, diga algo como: 'Comprei uma TV em 10x de 200 no crédito'."
+        )
+        return
+
+    linhas = ["📆 *Parcelamentos ativos:*\n"]
+    for p in parcelamentos:
+        restam = p.parcelas_total - p.parcelas_pagas
+        linhas.append(
+            f"`#{p.id}` {p.descricao} — {p.parcelas_pagas}/{p.parcelas_total} pagas, "
+            f"restam {restam}x de R$ {p.valor_parcela:.2f} (próxima: {p.proxima_data.strftime('%d/%m/%Y')})"
+        )
+    linhas.append("\nPara cancelar um: /cancelarparcela [número]")
+    await update.message.reply_text("\n".join(linhas), parse_mode='Markdown')
+
+async def comando_cancelar_parcela(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        parc_id = int(context.args[0].lstrip('#'))
+    except (IndexError, ValueError):
+        await update.message.reply_text("Uso correto: /cancelarparcela [número]. Veja os números com /parcelas.")
+        return
+
+    loop = asyncio.get_running_loop()
+    descricao = await loop.run_in_executor(None, cancelar_parcelamento, parc_id, user_id)
+    if descricao:
+        await update.message.reply_text(f"🗑️ Parcelamento de '{descricao}' cancelado. As parcelas já registradas foram mantidas.")
+    else:
+        await update.message.reply_text("Parcelamento não encontrado. Veja os números com /parcelas.")
 
 async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -249,28 +487,46 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if intencao == "erro_api":
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="Desculpe, o serviço de inteligência artificial da Google (Gemini) está temporariamente indisponível (Erro 503). Tente novamente em alguns minutos."
+            text="Desculpe, o serviço de inteligência artificial está temporariamente indisponível. Tente novamente em alguns minutos."
         )
         return
 
     if intencao == "transacao":
         dados = resultado["dados"]
         dados['categoria'] = dados['categoria'].capitalize()
-        
+
+        try:
+            parcelas = int(dados.pop('parcelas', 1) or 1)
+        except (TypeError, ValueError):
+            parcelas = 1
+
+        info_parcelas = ""
+        if parcelas > 1:
+            if await loop.run_in_executor(None, criar_parcelamento, dados, parcelas, user_id):
+                info_parcelas = (
+                    f"\n📆 *Parcelado:* 1/{parcelas} registrada agora. "
+                    f"As próximas serão registradas e avisadas todo mês. Veja com /parcelas"
+                )
+            dados['descricao'] = f"{dados['descricao']} (parcela 1/{parcelas})"
+
         sucesso = await loop.run_in_executor(None, salvar_transacao, dados, user_id)
-        
+
         if sucesso:
             alerta = ""
             if dados['tipo'] == 'Saida':
-                alerta = await loop.run_in_executor(None, verificar_alertas, dados['categoria'], user_id)
-            
+                alerta = await loop.run_in_executor(None, progresso_meta, dados['categoria'], user_id)
+
+            if dados['tipo'] == 'Entrada':
+                cabecalho = "💰 *Entrada registrada!*"
+            else:
+                cabecalho = "🧾 *Gasto anotado!*"
+
             msg = (
-                f"✅ *Anotado!*\n\n"
-                f"📝 *Item:* {dados['descricao']}\n"
-                f"💰 *Valor:* R$ {dados['valor']:.2f}\n"
-                f"📂 *Categoria:* {dados['categoria']}\n"
-                f"💳 *Método:* {dados['metodo_pagamento']}\n"
-                f"🔄 *Tipo:* {dados['tipo']}"
+                f"{cabecalho}\n\n"
+                f"📝 {dados['descricao']}\n"
+                f"💵 *{_fmt_reais(dados['valor'])}*\n"
+                f"📂 {dados['categoria']}  ·  💳 {dados['metodo_pagamento']}"
+                f"{info_parcelas}"
                 f"{alerta}"
             )
         else:
@@ -295,20 +551,9 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=f"Nenhum dado encontrado neste mês ({mes_nome}).")
             return
         
-        total_entrada = sum(t.valor for t in transacoes if t.tipo == 'Entrada')
-        total_saida = sum(t.valor for t in transacoes if t.tipo == 'Saida')
-        saldo = total_entrada - total_saida
-        
-        imagem = await loop.run_in_executor(None, gerar_dashboard_completo, transacoes)
-        
-        msg_resumo = (
-            f"📉 **Resumo Mensal ({mes_nome})**\n\n"
-            f"💸 **Recebido:** R$ {total_entrada:.2f}\n"
-            f"💳 **Gasto:** R$ {total_saida:.2f}\n"
-            f"💰 **Saldo do Mês:** R$ {saldo:.2f}\n"
-        )
+        metas = await loop.run_in_executor(None, buscar_metas, user_id)
+        imagem = await loop.run_in_executor(None, gerar_dashboard_completo, transacoes, metas, mes_nome)
 
-        await context.bot.send_message(chat_id=chat_id, text=msg_resumo, parse_mode='Markdown')
         await context.bot.send_photo(chat_id=chat_id, photo=imagem)
 
     elif intencao == "exportacao":
@@ -333,22 +578,27 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "   📝 Texto: 'Gastei 50 no mercado'\n"
             "   📸 Foto: Envie comprovante\n"
             "   🎙️ Áudio: Fale seu gasto\n\n"
-            "2️⃣ **Gestão de Metas:**\n"
+            "2️⃣ **Compras Parceladas:**\n"
+            "   📆 'Comprei uma TV em 10x de 200' — cada parcela é registrada e avisada todo mês\n"
+            "   Veja com /parcelas | Cancele com /cancelarparcela [número]\n\n"
+            "3️⃣ **Gestão de Metas:**\n"
             "   🎯 Use /meta [Categoria] [Valor]\n"
             "   Ex: /meta Alimentacao 500\n\n"
-            "3️⃣ **Análises:**\n"
+            "4️⃣ **Análises:**\n"
             "   📊 Peça: 'Me dê um resumo' para ver gráficos e saldo\n\n"
-            "4️⃣ **Exportação:**\n"
+            "5️⃣ **Exportação:**\n"
             "   📂 Peça: 'Exportar planilha' para receber o Excel"
         )
         await context.bot.send_message(chat_id=chat_id, text=msg_ajuda, parse_mode='Markdown')
 
 if __name__ == '__main__':
     token = os.getenv("TELEGRAM_TOKEN")
-    app = ApplicationBuilder().token(token).build()
-    
+    app = ApplicationBuilder().token(token).post_init(iniciar_tarefas).build()
+
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('meta', comando_definir_meta))
+    app.add_handler(CommandHandler('parcelas', comando_parcelas))
+    app.add_handler(CommandHandler('cancelarparcela', comando_cancelar_parcela))
     
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), processar_entrada))
     app.add_handler(MessageHandler(filters.PHOTO, processar_entrada))

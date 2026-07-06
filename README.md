@@ -15,9 +15,10 @@ O projeto segue uma arquitetura baseada em eventos, onde o bot atua como interfa
 1. **Entrada:** O usuário envia uma mensagem via Telegram. Pode ser texto ("Gastei 50 reais no almoço"), uma foto de um comprovante fiscal ou um áudio descrevendo um gasto.
 2. **Processamento (Backend Python):** O script principal recebe o objeto `Update` da API do Telegram.
 3. **Interpretação (AI Layer):**
-* Se for **Texto**, é enviado diretamente ao modelo Gemini.
-* Se for **Áudio/Imagem**, o arquivo é baixado temporariamente em memória (bytes) e enviado para a API do Gemini.
-* O modelo Gemini 2.5 Flash analisa o conteúdo e retorna um JSON estruturado contendo: `valor`, `categoria`, `descrição`, `método de pagamento` e `tipo` (Entrada/Saída).
+* Se for **Texto**, é enviado diretamente ao modelo de linguagem (Llama 4 Scout via Groq).
+* Se for **Imagem**, o arquivo é baixado temporariamente em memória (bytes) e enviado ao modelo com visão.
+* Se for **Áudio**, ele é transcrito pelo Whisper (via Groq) e o texto resultante segue o fluxo normal.
+* O modelo analisa o conteúdo e retorna um JSON estruturado contendo: `valor`, `categoria`, `descrição`, `método de pagamento` e `tipo` (Entrada/Saída).
 
 
 4. **Persistência:** Os dados estruturados são validados e salvos em um banco de dados no NeonDB utilizando o ORM SQLAlchemy.
@@ -29,7 +30,7 @@ As tecnologias foram escolhidas visando baixo custo de operação, facilidade de
 
 * **Linguagem:** Python
 * **Interface:** Telegram Bot API
-* **Inteligência Artificial:** Google Gemini 2.5 Flash
+* **Inteligência Artificial:** Llama 4 Scout + Whisper (via Groq)
 * **Banco de Dados:** NeonDB
 * **ORM:** SQLAlchemy
 * **Análise de Dados:** Pandas e Matplotlib
@@ -44,11 +45,15 @@ O sistema aceita inputs variados, reduzindo o atrito do usuário ao registrar ga
 
 O bot gera relatórios visuais sob demanda. A lógica de filtragem foi implementada para isolar transações baseadas no mês e ano correntes, garantindo que o usuário tenha uma visão atualizada da sua saúde financeira.
 
-### 3. Sistema de Metas e Alertas
+### 3. Compras Parceladas
+
+Ao registrar algo como "Comprei uma TV em 10x de 200", o sistema grava a primeira parcela e agenda as demais: todo mês a parcela do período é registrada automaticamente e o usuário recebe um aviso no Telegram. Os comandos `/parcelas` e `/cancelarparcela` listam e cancelam parcelamentos ativos.
+
+### 4. Sistema de Metas e Alertas
 
 O usuário pode definir tetos de gastos por categoria. O sistema verifica, a cada nova transação de saída, se o valor acumulado no mês ultrapassou a meta definida, emitindo alertas proativos.
 
-### 4. Exportação de Dados
+### 5. Exportação de Dados
 
 Para análises mais profundas, o sistema permite a exportação integral do banco de dados para um arquivo Excel (.xlsx), formatado automaticamente com colunas de data e valores monetários.
 
@@ -71,7 +76,6 @@ O projeto utiliza um ambiente virtual para gerenciamento de dependências.
 
 1. Clonar o repositório.
 2. Criar o arquivo .env na raiz do projeto.
-3. Configurar as variáveis de ambiente no arquivo `.env` (`TELEGRAM_TOKEN` e `GEMINI_API_KEY`).
+3. Configurar as variáveis de ambiente no arquivo `.env` (`TELEGRAM_TOKEN`, `GROQ_API_KEY` e `DATABASE_URL`).
 4. Instalar dependências: `pip install -r requirements.txt`.
-5. Inicializar o banco: `python models.py`.
-6. Executar o bot: `python run_bot.py`.
+5. Executar o bot: `python run_bot.py` (as tabelas do banco são criadas automaticamente).
