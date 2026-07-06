@@ -17,14 +17,16 @@ MODELO_AUDIO = "whisper-large-v3"
 # Prompt compacto: mesma extração, ~60% menos tokens que a versão original
 PROMPT_TEXTO = """Responda APENAS com JSON. Classifique a entrada (texto ou imagem de comprovante):
 
-1. Transação: {"intencao":"transacao","dados":{"descricao":"resumo do item","valor":0.00,"categoria":"Alimentacao|Transporte|Lazer|Casa|Contas|Servicos|Outros","metodo_pagamento":"Credito|Debito|Pix|Dinheiro","tipo":"Saida|Entrada","parcelas":1}}
+1. Transação: {"intencao":"transacao","dados":{"descricao":"resumo do item","valor":0.00,"categoria":"Alimentacao|Transporte|Lazer|Casa|Contas|Servicos|Outros","metodo_pagamento":"Credito|Debito|Pix|Dinheiro","tipo":"Saida|Entrada","parcelas":1,"assinatura":false}}
 - Fatura ou boleto (cartão de crédito, luz, água, internet, telefone): categoria "Contas".
 - Compra parcelada (ex: "10x de 200", "em 12 vezes"): "parcelas" = quantidade e "valor" = valor de UMA parcela (se o usuário der o total, divida pelo número de parcelas).
 - Compra à vista: "parcelas": 1.
+- Assinatura/mensalidade recorrente ("assinei Netflix", "mensalidade da academia"): "assinatura": true.
 2. Resumo/saldo/gráfico: {"intencao":"resumo"}
 3. Planilha/excel/exportar: {"intencao":"exportacao"}
 4. Ajuda/capacidades: {"intencao":"ajuda"}
-5. Conversa (saudação, papo, dúvida sobre o sistema ou sobre os gastos): {"intencao":"conversa","resposta":"resposta breve, simpática e natural em português, como um assistente pessoal"}
+5. Listar assinaturas/gastos fixos mensais ("quais assinaturas tenho?"): {"intencao":"assinaturas"}
+6. Conversa (saudação, papo, dúvida sobre o sistema ou sobre os gastos): {"intencao":"conversa","resposta":"resposta breve, simpática e natural em português, como um assistente pessoal"}
 - Saudações ("olá", "bom dia") e perguntas NUNCA são transações. Transação exige valor em dinheiro explícito.
 - Dúvidas sobre gastos: responda usando o contexto financeiro fornecido; para detalhes além dele, sugira pedir um "resumo".
 
@@ -35,6 +37,8 @@ ATALHOS = {
     "resumo": {"resumo", "saldo", "grafico", "gráfico", "dashboard", "balanco", "balanço"},
     "exportacao": {"planilha", "excel", "exportar", "csv", "extrato"},
     "ajuda": {"ajuda", "help", "comandos", "funcoes", "funções"},
+    # só o plural: "assinatura" no singular costuma aparecer em transações ("paguei a assinatura X")
+    "assinaturas": {"assinaturas"},
 }
 
 def _atalho_local(texto):
@@ -136,4 +140,14 @@ if __name__ == "__main__":
     print(conversa)
     assert conversa.get("intencao") == "conversa", f"Falhou: 'Olá' devia ser conversa, veio {conversa.get('intencao')}"
     assert conversa.get("resposta"), "Falhou: conversa sem resposta"
+
+    atalho_ass = interpretar_mensagem("quais assinaturas eu tenho?")
+    print(atalho_ass)
+    assert atalho_ass == {"intencao": "assinaturas"}, "Falhou: atalho local de assinaturas"
+
+    ass = interpretar_mensagem("Assinei o Spotify por 21,90 no crédito")
+    print(ass)
+    assert ass.get("intencao") == "transacao", f"Falhou: esperava transacao, veio {ass.get('intencao')}"
+    assert ass["dados"].get("assinatura") is True, "Falhou: 'assinei' devia marcar assinatura=true"
+    assert ass["dados"].get("valor") == 21.9, f"Falhou: esperava 21.9, veio {ass['dados'].get('valor')}"
     print("OK")

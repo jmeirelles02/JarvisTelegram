@@ -24,6 +24,16 @@ class Parcelamento(Base):
     parcelas_pagas = Column(Integer, default=1)
     proxima_data = Column(DateTime(timezone=True))
 
+class Assinatura(Base):
+    __tablename__ = "assinaturas"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(BigInteger, index=True)
+    descricao = Column(String)
+    valor = Column(Float)
+    categoria = Column(String)
+    metodo_pagamento = Column(String)
+    proxima_data = Column(DateTime(timezone=True))
+
 class Meta(Base):
     __tablename__ = "metas"
     id = Column(Integer, primary_key=True, index=True)

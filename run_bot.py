@@ -84,6 +84,98 @@ def cancelar_parcelamento(parc_id, user_id):
     finally:
         session.close()
 
+def criar_assinatura(dados, user_id):
+    session = database.SessionLocal()
+    try:
+        ass = models.Assinatura(
+            user_id=user_id,
+            descricao=dados['descricao'],
+            valor=dados['valor'],
+            categoria=dados['categoria'],
+            metodo_pagamento=dados['metodo_pagamento'],
+            proxima_data=datetime.now() + relativedelta(months=1),
+        )
+        session.add(ass)
+        session.commit()
+        return True
+    except Exception as e:
+        print(f"Erro ao criar assinatura: {e}")
+        return False
+    finally:
+        session.close()
+
+def listar_assinaturas(user_id):
+    session = database.SessionLocal()
+    try:
+        return session.query(models.Assinatura).filter_by(user_id=user_id).all()
+    finally:
+        session.close()
+
+def cancelar_assinatura(ass_id, user_id):
+    session = database.SessionLocal()
+    try:
+        ass = session.query(models.Assinatura).filter_by(id=ass_id, user_id=user_id).first()
+        if not ass:
+            return None
+        descricao = ass.descricao
+        session.delete(ass)
+        session.commit()
+        return descricao
+    except Exception as e:
+        print(f"Erro ao cancelar assinatura: {e}")
+        return None
+    finally:
+        session.close()
+
+def _texto_assinaturas(user_id):
+    assinaturas = listar_assinaturas(user_id)
+    if not assinaturas:
+        return (
+            "Nenhuma assinatura salva.\n"
+            "Para criar, diga algo como: 'Assinei Netflix por 39,90 no crédito'."
+        )
+    linhas = ["🔄 *Suas assinaturas:*\n"]
+    for a in assinaturas:
+        linhas.append(
+            f"`#{a.id}` {a.descricao} — {_fmt_reais(a.valor)}/mês "
+            f"(renova {a.proxima_data.strftime('%d/%m/%Y')})"
+        )
+    linhas.append(f"\n💰 Total fixo mensal: *{_fmt_reais(sum(a.valor for a in assinaturas))}*")
+    linhas.append("Para cancelar uma: /cancelarassinatura [número]")
+    return "\n".join(linhas)
+
+def processar_assinaturas_devidas():
+    """Registra as assinaturas que renovaram e devolve os avisos [(user_id, msg)]."""
+    session = database.SessionLocal()
+    avisos = []
+    try:
+        devidas = session.query(models.Assinatura).filter(
+            models.Assinatura.proxima_data <= datetime.now()
+        ).all()
+        for ass in devidas:
+            session.add(models.Transacao(
+                user_id=ass.user_id,
+                descricao=f"{ass.descricao} (assinatura)",
+                valor=ass.valor,
+                categoria=ass.categoria,
+                metodo_pagamento=ass.metodo_pagamento,
+                tipo='Saida',
+            ))
+            ass.proxima_data = ass.proxima_data + relativedelta(months=1)
+            avisos.append((ass.user_id, (
+                f"🔄 *Assinatura renovada!*\n\n"
+                f"📝 {ass.descricao}\n"
+                f"💰 {_fmt_reais(ass.valor)}\n"
+                f"📅 Próxima renovação: {ass.proxima_data.strftime('%d/%m/%Y')}"
+            )))
+        session.commit()
+        return avisos
+    except Exception as e:
+        print(f"Erro ao processar assinaturas: {e}")
+        return []
+    finally:
+        session.close()
+
 def processar_parcelas_devidas():
     """Registra as parcelas que venceram e devolve os avisos [(user_id, msg)]."""
     session = database.SessionLocal()
@@ -121,20 +213,21 @@ def processar_parcelas_devidas():
     finally:
         session.close()
 
-async def vigiar_parcelas(app):
-    # ponytail: checagem a cada 6h basta para aviso mensal e faz catch-up após restart
+async def vigiar_recorrencias(app):
+    # ponytail: checagem a cada 6h basta para recorrências mensais e faz catch-up após restart
     loop = asyncio.get_running_loop()
     while True:
         avisos = await loop.run_in_executor(None, processar_parcelas_devidas)
+        avisos += await loop.run_in_executor(None, processar_assinaturas_devidas)
         for user_id, msg in avisos:
             try:
                 await app.bot.send_message(chat_id=user_id, text=msg, parse_mode='Markdown')
             except Exception as e:
-                print(f"Erro ao enviar aviso de parcela: {e}")
+                print(f"Erro ao enviar aviso de recorrência: {e}")
         await asyncio.sleep(6 * 3600)
 
 async def iniciar_tarefas(app):
-    asyncio.create_task(vigiar_parcelas(app))
+    asyncio.create_task(vigiar_recorrencias(app))
 
 def definir_meta_db(categoria, valor, user_id):
     session = database.SessionLocal()
@@ -231,15 +324,24 @@ def contexto_financeiro(user_id):
     """Resumo de uma linha do mês atual, enviado como contexto para a IA responder dúvidas."""
     transacoes = buscar_transacoes_mes_atual(user_id)
     if not transacoes:
-        return "Sem transações registradas neste mês."
-    entradas = sum(t.valor for t in transacoes if t.tipo == 'Entrada')
-    saidas = sum(t.valor for t in transacoes if t.tipo == 'Saida')
-    por_cat = _somar_por([t for t in transacoes if t.tipo == 'Saida'], 'categoria')
-    cats = ", ".join(f"{c} {_fmt_reais(v)}" for c, v in sorted(por_cat.items(), key=lambda kv: -kv[1]))
-    return (
-        f"entradas {_fmt_reais(entradas)}, gastos {_fmt_reais(saidas)}, "
-        f"saldo {_fmt_reais(entradas - saidas)}. Gastos por categoria: {cats or 'nenhum'}."
-    )
+        partes = ["Sem transações registradas neste mês."]
+    else:
+        entradas = sum(t.valor for t in transacoes if t.tipo == 'Entrada')
+        saidas = sum(t.valor for t in transacoes if t.tipo == 'Saida')
+        por_cat = _somar_por([t for t in transacoes if t.tipo == 'Saida'], 'categoria')
+        cats = ", ".join(f"{c} {_fmt_reais(v)}" for c, v in sorted(por_cat.items(), key=lambda kv: -kv[1]))
+        partes = [
+            f"entradas {_fmt_reais(entradas)}, gastos {_fmt_reais(saidas)}, "
+            f"saldo {_fmt_reais(entradas - saidas)}. Gastos por categoria: {cats or 'nenhum'}."
+        ]
+    assinaturas = listar_assinaturas(user_id)
+    if assinaturas:
+        fixos = ", ".join(f"{a.descricao} {_fmt_reais(a.valor)}" for a in assinaturas)
+        partes.append(
+            f"Assinaturas mensais fixas: {fixos} "
+            f"(total {_fmt_reais(sum(a.valor for a in assinaturas))})."
+        )
+    return " ".join(partes)
 
 def gerar_arquivo_excel(user_id):
     session = database.SessionLocal()
@@ -402,6 +504,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'\n"
         "👉 Compra parcelada? Diga: 'Comprei uma TV em 10x de 200' — registro e aviso todo mês\n"
         "👉 Veja seus parcelamentos com /parcelas\n"
+        "👉 Assinatura mensal? Diga: 'Assinei Netflix por 39,90' — renovo e registro todo mês\n"
+        "👉 Veja suas assinaturas e gastos fixos com /assinaturas\n"
         "👉 Envie uma Foto de um comprovante \n"
         "👉 Envie um Áudio falando seu gasto "
     )
@@ -460,6 +564,26 @@ async def comando_cancelar_parcela(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(f"🗑️ Parcelamento de '{descricao}' cancelado. As parcelas já registradas foram mantidas.")
     else:
         await update.message.reply_text("Parcelamento não encontrado. Veja os números com /parcelas.")
+
+async def comando_assinaturas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    loop = asyncio.get_running_loop()
+    texto = await loop.run_in_executor(None, _texto_assinaturas, update.effective_user.id)
+    await update.message.reply_text(texto, parse_mode='Markdown')
+
+async def comando_cancelar_assinatura(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        ass_id = int(context.args[0].lstrip('#'))
+    except (IndexError, ValueError):
+        await update.message.reply_text("Uso correto: /cancelarassinatura [número]. Veja os números com /assinaturas.")
+        return
+
+    loop = asyncio.get_running_loop()
+    descricao = await loop.run_in_executor(None, cancelar_assinatura, ass_id, user_id)
+    if descricao:
+        await update.message.reply_text(f"🗑️ Assinatura de '{descricao}' cancelada. As cobranças já registradas foram mantidas.")
+    else:
+        await update.message.reply_text("Assinatura não encontrada. Veja os números com /assinaturas.")
 
 async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -527,9 +651,16 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parcelas = int(dados.pop('parcelas', 1) or 1)
         except (TypeError, ValueError):
             parcelas = 1
+        eh_assinatura = bool(dados.pop('assinatura', False))
 
         info_parcelas = ""
-        if parcelas > 1:
+        if eh_assinatura and parcelas == 1:
+            if await loop.run_in_executor(None, criar_assinatura, dados, user_id):
+                info_parcelas = (
+                    "\n🔄 *Assinatura salva!* Registrei a cobrança deste mês e vou "
+                    "renovar e registrar automaticamente todo mês. Veja com /assinaturas"
+                )
+        elif parcelas > 1:
             if await loop.run_in_executor(None, criar_parcelamento, dados, parcelas, user_id):
                 info_parcelas = (
                     f"\n📆 *Parcelado:* 1/{parcelas} registrada agora. "
@@ -561,6 +692,10 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "Erro ao salvar no banco."
         
         await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+
+    elif intencao == "assinaturas":
+        texto_ass = await loop.run_in_executor(None, _texto_assinaturas, user_id)
+        await context.bot.send_message(chat_id=chat_id, text=texto_ass, parse_mode='Markdown')
 
     elif intencao == "resumo":
         meses_pt = {
@@ -609,12 +744,15 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "2️⃣ **Compras Parceladas:**\n"
             "   📆 'Comprei uma TV em 10x de 200' — cada parcela é registrada e avisada todo mês\n"
             "   Veja com /parcelas | Cancele com /cancelarparcela [número]\n\n"
-            "3️⃣ **Gestão de Metas:**\n"
+            "3️⃣ **Assinaturas (gastos fixos):**\n"
+            "   🔄 'Assinei Netflix por 39,90' — registro e renovo todo mês\n"
+            "   Veja com /assinaturas | Cancele com /cancelarassinatura [número]\n\n"
+            "4️⃣ **Gestão de Metas:**\n"
             "   🎯 Use /meta [Categoria] [Valor]\n"
             "   Ex: /meta Alimentacao 500\n\n"
-            "4️⃣ **Análises:**\n"
+            "5️⃣ **Análises:**\n"
             "   📊 Peça: 'Me dê um resumo' para ver gráficos e saldo\n\n"
-            "5️⃣ **Exportação:**\n"
+            "6️⃣ **Exportação:**\n"
             "   📂 Peça: 'Exportar planilha' para receber o Excel"
         )
         await context.bot.send_message(chat_id=chat_id, text=msg_ajuda, parse_mode='Markdown')
@@ -627,6 +765,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('meta', comando_definir_meta))
     app.add_handler(CommandHandler('parcelas', comando_parcelas))
     app.add_handler(CommandHandler('cancelarparcela', comando_cancelar_parcela))
+    app.add_handler(CommandHandler('assinaturas', comando_assinaturas))
+    app.add_handler(CommandHandler('cancelarassinatura', comando_cancelar_assinatura))
     
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), processar_entrada))
     app.add_handler(MessageHandler(filters.PHOTO, processar_entrada))
