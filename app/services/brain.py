@@ -24,6 +24,9 @@ PROMPT_TEXTO = """Responda APENAS com JSON. Classifique a entrada (texto ou imag
 2. Resumo/saldo/gráfico: {"intencao":"resumo"}
 3. Planilha/excel/exportar: {"intencao":"exportacao"}
 4. Ajuda/capacidades: {"intencao":"ajuda"}
+5. Conversa (saudação, papo, dúvida sobre o sistema ou sobre os gastos): {"intencao":"conversa","resposta":"resposta breve, simpática e natural em português, como um assistente pessoal"}
+- Saudações ("olá", "bom dia") e perguntas NUNCA são transações. Transação exige valor em dinheiro explícito.
+- Dúvidas sobre gastos: responda usando o contexto financeiro fornecido; para detalhes além dele, sugira pedir um "resumo".
 
 Se receber imagem: extraia o valor total e o estabelecimento."""
 
@@ -53,7 +56,7 @@ def _transcrever_audio(api_key, arquivo_bytes, mime_type):
     response.raise_for_status()
     return response.json()["text"]
 
-def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=None):
+def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=None, contexto=None):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return None
@@ -79,7 +82,10 @@ def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=No
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime_type};base64,{b64}"},
             })
-        conteudo.append({"type": "text", "text": f"{mensagem_usuario or ''}\n{PROMPT_TEXTO}"})
+        texto_prompt = f"{mensagem_usuario or ''}\n{PROMPT_TEXTO}"
+        if contexto:
+            texto_prompt += f"\nContexto financeiro do usuário (mês atual): {contexto}"
+        conteudo.append({"type": "text", "text": texto_prompt})
 
         response = requests.post(
             f"{GROQ_URL}/chat/completions",
@@ -125,4 +131,9 @@ if __name__ == "__main__":
     dados = resultado["dados"]
     assert dados.get("parcelas") == 10, f"Falhou: esperava 10 parcelas, veio {dados.get('parcelas')}"
     assert dados.get("valor") == 200.0, f"Falhou: esperava valor 200.0, veio {dados.get('valor')}"
+
+    conversa = interpretar_mensagem("Olá Jarvis, tudo bem?", contexto="entradas R$ 5.000,00, gastos R$ 1.200,00")
+    print(conversa)
+    assert conversa.get("intencao") == "conversa", f"Falhou: 'Olá' devia ser conversa, veio {conversa.get('intencao')}"
+    assert conversa.get("resposta"), "Falhou: conversa sem resposta"
     print("OK")

@@ -227,6 +227,20 @@ def buscar_transacoes_mes_atual(user_id):
     finally:
         session.close()
 
+def contexto_financeiro(user_id):
+    """Resumo de uma linha do mês atual, enviado como contexto para a IA responder dúvidas."""
+    transacoes = buscar_transacoes_mes_atual(user_id)
+    if not transacoes:
+        return "Sem transações registradas neste mês."
+    entradas = sum(t.valor for t in transacoes if t.tipo == 'Entrada')
+    saidas = sum(t.valor for t in transacoes if t.tipo == 'Saida')
+    por_cat = _somar_por([t for t in transacoes if t.tipo == 'Saida'], 'categoria')
+    cats = ", ".join(f"{c} {_fmt_reais(v)}" for c, v in sorted(por_cat.items(), key=lambda kv: -kv[1]))
+    return (
+        f"entradas {_fmt_reais(entradas)}, gastos {_fmt_reais(saidas)}, "
+        f"saldo {_fmt_reais(entradas - saidas)}. Gastos por categoria: {cats or 'nenhum'}."
+    )
+
 def gerar_arquivo_excel(user_id):
     session = database.SessionLocal()
     try:
@@ -476,7 +490,8 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
         texto = "Transcreva o áudio e analise o gasto"
 
     loop = asyncio.get_running_loop()
-    resultado = await loop.run_in_executor(None, brain.interpretar_mensagem, texto, arquivo_bytes, mime_type)
+    contexto = await loop.run_in_executor(None, contexto_financeiro, user_id)
+    resultado = await loop.run_in_executor(None, brain.interpretar_mensagem, texto, arquivo_bytes, mime_type, contexto)
 
     if not resultado:
         await context.bot.send_message(chat_id=chat_id, text="Não entendi. Tente ser mais claro.")
@@ -491,8 +506,21 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if intencao == "conversa":
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=resultado.get("resposta") or "Oi! 👋 Como posso ajudar?"
+        )
+        return
+
     if intencao == "transacao":
         dados = resultado["dados"]
+        if not dados.get('valor'):
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Não identifiquei o valor. Pode repetir com o número? Ex: 'Gastei 50 no mercado'."
+            )
+            return
         dados['categoria'] = dados['categoria'].capitalize()
 
         try:
