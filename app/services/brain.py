@@ -19,6 +19,7 @@ PROMPT_TEXTO = """Responda APENAS com JSON. Classifique a entrada (texto ou imag
 
 1. Transação: {"intencao":"transacao","dados":{"descricao":"resumo do item","valor":0.00,"categoria":"Alimentacao|Transporte|Lazer|Casa|Contas|Servicos|Outros","metodo_pagamento":"Credito|Debito|Pix|Dinheiro","tipo":"Saida|Entrada","parcelas":1,"assinatura":false}}
 - Fatura ou boleto (cartão de crédito, luz, água, internet, telefone): categoria "Contas".
+- Se tipo "Entrada", use categoria "Salario|Extra|Rendimentos|Vendas|Presente|Outros" (salário/pagamento mensal = Salario; freela/bico = Extra; juros/dividendos/aluguel recebido = Rendimentos).
 - Compra parcelada (ex: "10x de 200", "em 12 vezes"): "parcelas" = quantidade e "valor" = valor de UMA parcela (se o usuário der o total, divida pelo número de parcelas).
 - Compra à vista: "parcelas": 1.
 - Assinatura/mensalidade recorrente ("assinei Netflix", "mensalidade da academia"): "assinatura": true.
@@ -144,6 +145,12 @@ if __name__ == "__main__":
     atalho_ass = interpretar_mensagem("quais assinaturas eu tenho?")
     print(atalho_ass)
     assert atalho_ass == {"intencao": "assinaturas"}, "Falhou: atalho local de assinaturas"
+
+    ent = interpretar_mensagem("Recebi 5000 de salário no pix")
+    print(ent)
+    assert ent.get("intencao") == "transacao", f"Falhou: esperava transacao, veio {ent.get('intencao')}"
+    assert ent["dados"].get("tipo") == "Entrada", f"Falhou: esperava Entrada, veio {ent['dados'].get('tipo')}"
+    assert ent["dados"].get("categoria") == "Salario", f"Falhou: esperava Salario, veio {ent['dados'].get('categoria')}"
 
     ass = interpretar_mensagem("Assinei o Spotify por 21,90 no crédito")
     print(ass)
