@@ -21,8 +21,13 @@ class Parcelamento(Base):
     categoria = Column(String)
     metodo_pagamento = Column(String)
     parcelas_total = Column(Integer)
-    parcelas_pagas = Column(Integer, default=1)
+    parcelas_pagas = Column(Integer, default=0)
     proxima_data = Column(DateTime(timezone=True))
+
+class ConfigFatura(Base):
+    __tablename__ = "config_fatura"
+    user_id = Column(BigInteger, primary_key=True)
+    dia_fechamento = Column(Integer)
 
 class Assinatura(Base):
     __tablename__ = "assinaturas"

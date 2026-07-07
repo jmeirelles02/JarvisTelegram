@@ -39,9 +39,41 @@ def salvar_transacao(dados_ia, user_id):
     finally:
         session.close()
 
-def criar_parcelamento(dados, parcelas, user_id):
+def _proxima_data_fatura(dia):
+    """Próxima ocorrência do dia de fechamento da fatura (clampa em meses curtos)."""
+    hoje = datetime.now()
+    data = hoje + relativedelta(day=dia)
+    if data <= hoje:
+        data = hoje + relativedelta(months=1, day=dia)
+    return data
+
+def definir_dia_fatura(dia, user_id):
     session = database.SessionLocal()
     try:
+        config = session.query(models.ConfigFatura).filter_by(user_id=user_id).first()
+        if config:
+            config.dia_fechamento = dia
+        else:
+            session.add(models.ConfigFatura(user_id=user_id, dia_fechamento=dia))
+        session.commit()
+        return True
+    except Exception as e:
+        print(f"Erro ao definir dia da fatura: {e}")
+        return False
+    finally:
+        session.close()
+
+def criar_parcelamento(dados, parcelas, user_id):
+    """Agenda o parcelamento sem registrar gasto agora: a 1ª parcela só conta
+    quando a fatura fecha. Devolve (data_primeira_parcela, tem_dia_fatura) ou None."""
+    session = database.SessionLocal()
+    try:
+        config = session.query(models.ConfigFatura).filter_by(user_id=user_id).first()
+        if config:
+            primeira = _proxima_data_fatura(config.dia_fechamento)
+        else:
+            # ponytail: sem /fatura definido, aproxima a 1ª parcela em +1 mês
+            primeira = datetime.now() + relativedelta(months=1)
         parc = models.Parcelamento(
             user_id=user_id,
             descricao=dados['descricao'],
@@ -49,15 +81,15 @@ def criar_parcelamento(dados, parcelas, user_id):
             categoria=dados['categoria'],
             metodo_pagamento=dados['metodo_pagamento'],
             parcelas_total=parcelas,
-            parcelas_pagas=1,
-            proxima_data=datetime.now() + relativedelta(months=1),
+            parcelas_pagas=0,
+            proxima_data=primeira,
         )
         session.add(parc)
         session.commit()
-        return True
+        return primeira, config is not None
     except Exception as e:
         print(f"Erro ao criar parcelamento: {e}")
-        return False
+        return None
     finally:
         session.close()
 
@@ -504,6 +536,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'\n"
         "👉 Compra parcelada? Diga: 'Comprei uma TV em 10x de 200' — registro e aviso todo mês\n"
         "👉 Veja seus parcelamentos com /parcelas\n"
+        "👉 Cartão de crédito? Diga o dia que a fatura fecha: /fatura [dia]\n"
         "👉 Assinatura mensal? Diga: 'Assinei Netflix por 39,90' — renovo e registro todo mês\n"
         "👉 Veja suas assinaturas e gastos fixos com /assinaturas\n"
         "👉 Envie uma Foto de um comprovante \n"
@@ -564,6 +597,25 @@ async def comando_cancelar_parcela(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(f"🗑️ Parcelamento de '{descricao}' cancelado. As parcelas já registradas foram mantidas.")
     else:
         await update.message.reply_text("Parcelamento não encontrado. Veja os números com /parcelas.")
+
+async def comando_fatura(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        dia = int(context.args[0])
+    except (IndexError, ValueError):
+        dia = 0
+    if not 1 <= dia <= 31:
+        await update.message.reply_text("Uso correto: /fatura [dia do fechamento]. Ex: /fatura 5")
+        return
+
+    loop = asyncio.get_running_loop()
+    if await loop.run_in_executor(None, definir_dia_fatura, dia, user_id):
+        await update.message.reply_text(
+            f"💳 Anotado: sua fatura fecha todo dia {dia}. "
+            f"Novas compras parceladas terão a 1ª parcela prevista para o próximo fechamento."
+        )
+    else:
+        await update.message.reply_text("Erro ao salvar o dia da fatura.")
 
 async def comando_assinaturas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_running_loop()
@@ -653,20 +705,37 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parcelas = 1
         eh_assinatura = bool(dados.pop('assinatura', False))
 
+        if parcelas > 1:
+            resultado_parc = await loop.run_in_executor(None, criar_parcelamento, dados, parcelas, user_id)
+            if not resultado_parc:
+                await context.bot.send_message(chat_id=chat_id, text="Erro ao salvar no banco.")
+                return
+            primeira, tem_fatura = resultado_parc
+            dica_fatura = "" if tem_fatura else (
+                "\n\n💡 Me diga o dia que sua fatura fecha com /fatura [dia] e eu acerto as datas."
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"📆 *Compra parcelada anotada!*\n\n"
+                    f"📝 {dados['descricao']}\n"
+                    f"💵 *{parcelas}x de {_fmt_reais(dados['valor'])}*\n"
+                    f"📂 {dados['categoria']}  ·  💳 {dados['metodo_pagamento']}\n"
+                    f"🗓️ 1ª parcela prevista para {primeira.strftime('%d/%m/%Y')} — nada entrou nos "
+                    f"gastos deste mês; registro e aviso quando cada parcela cair. Veja com /parcelas"
+                    f"{dica_fatura}"
+                ),
+                parse_mode='Markdown'
+            )
+            return
+
         info_parcelas = ""
-        if eh_assinatura and parcelas == 1:
+        if eh_assinatura:
             if await loop.run_in_executor(None, criar_assinatura, dados, user_id):
                 info_parcelas = (
                     "\n🔄 *Assinatura salva!* Registrei a cobrança deste mês e vou "
                     "renovar e registrar automaticamente todo mês. Veja com /assinaturas"
                 )
-        elif parcelas > 1:
-            if await loop.run_in_executor(None, criar_parcelamento, dados, parcelas, user_id):
-                info_parcelas = (
-                    f"\n📆 *Parcelado:* 1/{parcelas} registrada agora. "
-                    f"As próximas serão registradas e avisadas todo mês. Veja com /parcelas"
-                )
-            dados['descricao'] = f"{dados['descricao']} (parcela 1/{parcelas})"
 
         sucesso = await loop.run_in_executor(None, salvar_transacao, dados, user_id)
 
@@ -742,7 +811,8 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "   📸 Foto: Envie comprovante\n"
             "   🎙️ Áudio: Fale seu gasto\n\n"
             "2️⃣ **Compras Parceladas:**\n"
-            "   📆 'Comprei uma TV em 10x de 200' — cada parcela é registrada e avisada todo mês\n"
+            "   📆 'Comprei uma TV em 10x de 200' — registro cada parcela no mês em que ela cai\n"
+            "   💳 /fatura [dia] — informe o fechamento da fatura para acertar as datas\n"
             "   Veja com /parcelas | Cancele com /cancelarparcela [número]\n\n"
             "3️⃣ **Assinaturas (gastos fixos):**\n"
             "   🔄 'Assinei Netflix por 39,90' — registro e renovo todo mês\n"
@@ -765,6 +835,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('meta', comando_definir_meta))
     app.add_handler(CommandHandler('parcelas', comando_parcelas))
     app.add_handler(CommandHandler('cancelarparcela', comando_cancelar_parcela))
+    app.add_handler(CommandHandler('fatura', comando_fatura))
     app.add_handler(CommandHandler('assinaturas', comando_assinaturas))
     app.add_handler(CommandHandler('cancelarassinatura', comando_cancelar_assinatura))
     

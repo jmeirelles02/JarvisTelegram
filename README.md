@@ -47,7 +47,7 @@ O bot gera relatórios visuais sob demanda. A lógica de filtragem foi implement
 
 ### 3. Compras Parceladas
 
-Ao registrar algo como "Comprei uma TV em 10x de 200", o sistema grava a primeira parcela e agenda as demais: todo mês a parcela do período é registrada automaticamente e o usuário recebe um aviso no Telegram. Os comandos `/parcelas` e `/cancelarparcela` listam e cancelam parcelamentos ativos.
+Ao registrar algo como "Comprei uma TV em 10x de 200", o sistema agenda todas as parcelas sem somar nada aos gastos do mês da compra — a 1ª parcela só é registrada quando a fatura do cartão fecha (dia configurável com `/fatura [dia]`; sem configuração, assume um mês após a compra). A cada mês, a parcela do período é registrada automaticamente e o usuário recebe um aviso no Telegram. Os comandos `/parcelas` e `/cancelarparcela` listam e cancelam parcelamentos ativos.
 
 ### 4. Sistema de Metas e Alertas
 
