@@ -28,6 +28,20 @@ PROMPT_TEXTO = """Responda APENAS com JSON. Classifique a entrada (texto, áudio
 - Saudações ("olá", "bom dia") e perguntas NUNCA são transações. Transação exige valor em dinheiro explícito.
 - Dúvidas sobre gastos: responda usando o contexto financeiro fornecido; para detalhes além dele, sugira pedir um "resumo".
 
+Assistente pessoal (prioridade sobre transações quando o pedido for agendar algo):
+7. Criar lembrete: {"intencao":"lembrete_criar","dados":{"descricao":"pagar aluguel","data":"YYYY-MM-DDTHH:MM:SS","repeticao":"nenhuma|diaria|semanal|mensal|dias_uteis"}}
+8. Listar lembretes: {"intencao":"lembretes"}
+9. Alterar lembrete identificado por número: {"intencao":"lembrete_alterar","dados":{"id":1,"acao":"concluir|cancelar|adiar","minutos":10}}
+10. Consultar calendário: {"intencao":"agenda","dados":{"inicio":"YYYY-MM-DDT00:00:00","fim":"YYYY-MM-DDT00:00:00"}}. O fim é exclusivo. Sem período, use dados {} para hoje.
+11. Criar compromisso: {"intencao":"evento_criar","dados":{"titulo":"Dentista","inicio":"YYYY-MM-DDTHH:MM:SS","fim":"YYYY-MM-DDTHH:MM:SS","aviso_minutos":30}}
+12. Ver resumo do dia (agenda + lembretes + finanças): {"intencao":"hoje"}. Resumo financeiro/gráfico continua sendo "resumo".
+13. Configurar envio diário: {"intencao":"resumo_diario_config","dados":{"horario":"08:00"}}; para desligar, dados {"desativar":true}.
+- Use a data/hora atual e o fuso fornecidos para resolver amanhã, sexta, daqui a 10 minutos e recorrências. Retorne horários locais sem offset, a menos que o usuário especifique outro fuso.
+- Nunca invente data, hora, duração de compromisso, identificador ou sucesso de uma ação. Aviso de evento não informado: 30 minutos.
+- Se faltarem dados ou houver ambiguidade, retorne {"intencao":"esclarecer","resposta":"pergunta curta pedindo para reenviar o pedido completo com o dado faltante"}.
+- Lembrete mensal sem horário exige esclarecimento. A primeira ocorrência deve estar no futuro. Não registre como gasto um pedido para lembrar de pagar algo.
+- Não confirme nem descarte eventos: esses pedidos exigem /confirmar ID ou /descartar ID. Não diga que consultou ou criou algo em uma resposta de conversa.
+
 Se receber imagem: extraia o valor total e o estabelecimento."""
 
 # ponytail: atalho por palavra-chave — intenções simples não gastam nenhum token
@@ -40,14 +54,23 @@ ATALHOS = {
 }
 
 def _atalho_local(texto):
+    normalizado = texto.lower().strip().rstrip("?!.")
+    pessoais = {"agenda": "agenda", "minha agenda": "agenda", "lembretes": "lembretes",
+                "meus lembretes": "lembretes", "hoje": "hoje", "resumo do dia": "hoje",
+                "resumo diário": "hoje", "resumo diario": "hoje"}
+    if normalizado in pessoais:
+        return {"intencao": pessoais[normalizado]}
     palavras = set(texto.lower().split())
+    if palavras & {"lembra", "lembre", "lembrar", "lembrete", "lembretes", "agenda", "agendar",
+                   "calendário", "calendario", "diário", "diario", "diariamente"}:
+        return None
     if len(palavras) <= 5:
         for intencao, chaves in ATALHOS.items():
             if palavras & chaves:
                 return {"intencao": intencao}
     return None
 
-def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=None, contexto=None):
+def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=None, contexto=None, contexto_temporal=None):
     try:
         if mensagem_usuario and not arquivo_bytes:
             atalho = _atalho_local(mensagem_usuario)
@@ -80,6 +103,8 @@ def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=No
         texto_prompt = f"{mensagem_usuario or ''}\n{PROMPT_TEXTO}"
         if contexto:
             texto_prompt += f"\nContexto financeiro do usuário (mês atual): {contexto}"
+        if contexto_temporal:
+            texto_prompt += f"\nContexto temporal para agendamentos: {contexto_temporal}"
         conteudo.append({"type": "text", "text": texto_prompt})
 
         response = requests.post(
@@ -90,7 +115,7 @@ def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=No
                 "messages": [{"role": "user", "content": conteudo}],
                 "response_format": {"type": "json_object"},
                 "temperature": 0,
-                "max_tokens": 300,
+                "max_tokens": 600,
             },
             timeout=60,
         )

@@ -1,7 +1,11 @@
 import os
-import logging
-import asyncio
 import io
+import time
+import logging
+import threading
+import matplotlib
+
+matplotlib.use('Agg')  # VPS/container não tem display: backend headless antes do pyplot
 import matplotlib.pyplot as plt
 
 plt.rcParams['text.parse_math'] = False  # sem isso, "R$ x ... R$ y" vira fórmula matemática
@@ -9,12 +13,12 @@ import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
+from flask import Flask, request
 from sqlalchemy import func, extract
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from web_alive import manter_vivo
-from app.services import brain
+from app.services import brain, telegram, transport as whatsapp
 from app import models, database
+from app.services.personal import AssistentePessoal
+from app.services.command_menu import menu_comandos
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -24,6 +28,8 @@ logging.basicConfig(
 load_dotenv()
 
 models.Base.metadata.create_all(bind=database.engine)
+
+assistente_pessoal = AssistentePessoal(database.SessionLocal, whatsapp.enviar_texto)
 
 def salvar_transacao(dados_ia, user_id):
     session = database.SessionLocal()
@@ -169,7 +175,7 @@ def _texto_assinaturas(user_id):
     linhas = ["🔄 *Suas assinaturas:*\n"]
     for a in assinaturas:
         linhas.append(
-            f"`#{a.id}` {a.descricao} — {_fmt_reais(a.valor)}/mês "
+            f"*#{a.id}* {a.descricao} — {_fmt_reais(a.valor)}/mês "
             f"(renova {a.proxima_data.strftime('%d/%m/%Y')})"
         )
     linhas.append(f"\n💰 Total fixo mensal: *{_fmt_reais(sum(a.valor for a in assinaturas))}*")
@@ -245,21 +251,17 @@ def processar_parcelas_devidas():
     finally:
         session.close()
 
-async def vigiar_recorrencias(app):
+def vigiar_recorrencias():
     # ponytail: checagem a cada 6h basta para recorrências mensais e faz catch-up após restart
-    loop = asyncio.get_running_loop()
     while True:
-        avisos = await loop.run_in_executor(None, processar_parcelas_devidas)
-        avisos += await loop.run_in_executor(None, processar_assinaturas_devidas)
+        avisos = processar_parcelas_devidas() + processar_assinaturas_devidas()
         for user_id, msg in avisos:
             try:
-                await app.bot.send_message(chat_id=user_id, text=msg, parse_mode='Markdown')
+                whatsapp.enviar_texto(user_id, msg)
             except Exception as e:
                 print(f"Erro ao enviar aviso de recorrência: {e}")
-        await asyncio.sleep(6 * 3600)
+        time.sleep(6 * 3600)
 
-async def iniciar_tarefas(app):
-    asyncio.create_task(vigiar_recorrencias(app))
 
 def definir_meta_db(categoria, valor, user_id):
     session = database.SessionLocal()
@@ -526,49 +528,99 @@ def gerar_dashboard_completo(transacoes, metas=None, titulo='Dashboard Financeir
     plt.close()
     return buf
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "**Jarvis Seu Assistente Financeiro**\n\n"
-        "Coisas que pode me pedir:\n"
-        "👉 'Para definir metas para você mesmo digite: /meta [categoria] [valor]'\n"
-        "👉 'Para exportar uma planilha digite: Exportar planilha'\n"
-        "👉 'Para obter um resumo digite: Me dê um resumo'\n"
-        "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'\n"
-        "👉 Compra parcelada? Diga: 'Comprei uma TV em 10x de 200' — registro e aviso todo mês\n"
-        "👉 Veja seus parcelamentos com /parcelas\n"
-        "👉 Cartão de crédito? Diga o dia que a fatura fecha: /fatura [dia]\n"
-        "👉 Assinatura mensal? Diga: 'Assinei Netflix por 39,90' — renovo e registro todo mês\n"
-        "👉 Veja suas assinaturas e gastos fixos com /assinaturas\n"
-        "👉 Envie uma Foto de um comprovante \n"
-        "👉 Envie um Áudio falando seu gasto "
-    )
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='Markdown')
+# ---------------------------------------------------------------------------
+# Comandos
+# ---------------------------------------------------------------------------
 
-async def comando_definir_meta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+TEXTO_START = (
+    "*Jarvis Seu Assistente Pessoal e Financeiro*\n\n"
+    "Coisas que pode me pedir:\n"
+    "👉 Envie / ou /menu para ver todos os comandos\n"
+    "👉 'Para definir metas para você mesmo digite: /meta [categoria] [valor]'\n"
+    "👉 'Para exportar uma planilha digite: Exportar planilha'\n"
+    "👉 'Para obter um resumo digite: Me dê um resumo'\n"
+    "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'\n"
+    "👉 Compra parcelada? Diga: 'Comprei uma TV em 10x de 200' — registro e aviso todo mês\n"
+    "👉 Veja seus parcelamentos com /parcelas\n"
+    "👉 Cartão de crédito? Diga o dia que a fatura fecha: /fatura [dia]\n"
+    "👉 Assinatura mensal? Diga: 'Assinei Netflix por 39,90' — renovo e registro todo mês\n"
+    "👉 Veja suas assinaturas e gastos fixos com /assinaturas\n"
+    "👉 Envie uma Foto de um comprovante \n"
+    "👉 Envie um Áudio falando seu gasto\n"
+    "👉 'Me lembra de pagar a internet amanhã às 9h'\n"
+    "👉 'Marca dentista amanhã das 15h às 16h' — confirmo antes de criar\n"
+    "👉 /agenda — compromissos de hoje (iCloud ou Google conectado)\n"
+    "👉 /lembretes — listar, concluir, adiar ou cancelar\n"
+    "👉 /resumodiario 08:00 — receber seu resumo diário\n"
+    "👉 /hoje — agenda, lembretes e finanças do dia"
+    "\n👉 /meuid — consultar seu identificador para conectar o calendário"
+)
+
+TEXTO_AJUDA = (
+    "*Minhas Funcionalidades:*\n\n"
+    "Envie / ou /menu para ver todos os comandos. Envie /ca para filtrar opções.\n\n"
+    "1️⃣ *Registrar Transações:*\n"
+    "   📝 Texto: 'Gastei 50 no mercado'\n"
+    "   📸 Foto: Envie comprovante\n"
+    "   🎙️ Áudio: Fale seu gasto\n\n"
+    "2️⃣ *Compras Parceladas:*\n"
+    "   📆 'Comprei uma TV em 10x de 200' — registro cada parcela no mês em que ela cai\n"
+    "   💳 /fatura [dia] — informe o fechamento da fatura para acertar as datas\n"
+    "   Veja com /parcelas | Cancele com /cancelarparcela [número]\n\n"
+    "3️⃣ *Assinaturas (gastos fixos):*\n"
+    "   🔄 'Assinei Netflix por 39,90' — registro e renovo todo mês\n"
+    "   Veja com /assinaturas | Cancele com /cancelarassinatura [número]\n\n"
+    "4️⃣ *Gestão de Metas:*\n"
+    "   🎯 Use /meta [Categoria] [Valor]\n"
+    "   Ex: /meta Alimentacao 500\n\n"
+    "5️⃣ *Análises:*\n"
+    "   📊 Peça: 'Me dê um resumo' para ver gráficos e saldo\n\n"
+    "6️⃣ *Exportação:*\n"
+    "   📂 Peça: 'Exportar planilha' para receber o Excel\n\n"
+    "7️⃣ *Lembretes:*\n"
+    "   'Me lembra de pagar o aluguel todo dia 5 às 9h'\n"
+    "   /lembretes · /adiar ID MINUTOS · /concluir ID · /cancelarlembrete ID\n"
+    "   Concluir encerra também os lembretes recorrentes.\n\n"
+    "8️⃣ *Calendário (iCloud ou Google):*\n"
+    "   /calendarios · /agenda ou 'Qual minha agenda de amanhã?'\n"
+    "   'Marca dentista amanhã das 15h às 16h'\n"
+    "   /confirmar ID ou /descartar ID após conferir o pedido\n"
+    "   Aviso no WhatsApp: 30 min antes, ou a antecedência pedida ao criar.\n\n"
+    "9️⃣ *Resumo diário:*\n"
+    "   /hoje — consultar agora\n"
+    "   /resumodiario 08:00 — ativar · /resumodiario off — desligar\n"
+    "   /fuso America/Sao_Paulo — configurar fuso horário"
+)
+
+
+def comando_start(user_id, args):
+    whatsapp.enviar_texto(user_id, TEXTO_START)
+
+
+def comando_definir_meta(user_id, args):
     try:
-        if len(context.args) < 2:
-            await update.message.reply_text("Uso correto: /meta [Categoria] [Valor]")
+        if len(args) < 2:
+            whatsapp.enviar_texto(user_id, "Uso correto: /meta [Categoria] [Valor]")
             return
 
-        categoria = context.args[0].capitalize()
-        valor = float(context.args[1].replace(',', '.'))
+        categoria = args[0].capitalize()
+        valor = float(args[1].replace(',', '.'))
 
         if definir_meta_db(categoria, valor, user_id):
-            await update.message.reply_text(f"🎯 Meta de {categoria} definida para R$ {valor:.2f}!")
+            whatsapp.enviar_texto(user_id, f"🎯 Meta de {categoria} definida para R$ {valor:.2f}!")
         else:
-            await update.message.reply_text("Erro ao salvar meta.")
-            
-    except ValueError:
-        await update.message.reply_text("O valor deve ser um número (ex: 500 ou 500.50).")
+            whatsapp.enviar_texto(user_id, "Erro ao salvar meta.")
 
-async def comando_parcelas(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    loop = asyncio.get_running_loop()
-    parcelamentos = await loop.run_in_executor(None, listar_parcelamentos, user_id)
+    except ValueError:
+        whatsapp.enviar_texto(user_id, "O valor deve ser um número (ex: 500 ou 500.50).")
+
+
+def comando_parcelas(user_id, args):
+    parcelamentos = listar_parcelamentos(user_id)
 
     if not parcelamentos:
-        await update.message.reply_text(
+        whatsapp.enviar_texto(
+            user_id,
             "Nenhum parcelamento ativo.\nPara criar, diga algo como: 'Comprei uma TV em 10x de 200 no crédito'."
         )
         return
@@ -577,124 +629,136 @@ async def comando_parcelas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for p in parcelamentos:
         restam = p.parcelas_total - p.parcelas_pagas
         linhas.append(
-            f"`#{p.id}` {p.descricao} — {p.parcelas_pagas}/{p.parcelas_total} pagas, "
+            f"*#{p.id}* {p.descricao} — {p.parcelas_pagas}/{p.parcelas_total} pagas, "
             f"restam {restam}x de R$ {p.valor_parcela:.2f} (próxima: {p.proxima_data.strftime('%d/%m/%Y')})"
         )
     linhas.append("\nPara cancelar um: /cancelarparcela [número]")
-    await update.message.reply_text("\n".join(linhas), parse_mode='Markdown')
+    whatsapp.enviar_texto(user_id, "\n".join(linhas))
 
-async def comando_cancelar_parcela(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+
+def comando_cancelar_parcela(user_id, args):
     try:
-        parc_id = int(context.args[0].lstrip('#'))
+        parc_id = int(args[0].lstrip('#'))
     except (IndexError, ValueError):
-        await update.message.reply_text("Uso correto: /cancelarparcela [número]. Veja os números com /parcelas.")
+        whatsapp.enviar_texto(user_id, "Uso correto: /cancelarparcela [número]. Veja os números com /parcelas.")
         return
 
-    loop = asyncio.get_running_loop()
-    descricao = await loop.run_in_executor(None, cancelar_parcelamento, parc_id, user_id)
+    descricao = cancelar_parcelamento(parc_id, user_id)
     if descricao:
-        await update.message.reply_text(f"🗑️ Parcelamento de '{descricao}' cancelado. As parcelas já registradas foram mantidas.")
+        whatsapp.enviar_texto(user_id, f"🗑️ Parcelamento de '{descricao}' cancelado. As parcelas já registradas foram mantidas.")
     else:
-        await update.message.reply_text("Parcelamento não encontrado. Veja os números com /parcelas.")
+        whatsapp.enviar_texto(user_id, "Parcelamento não encontrado. Veja os números com /parcelas.")
 
-async def comando_fatura(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+
+def comando_fatura(user_id, args):
     try:
-        dia = int(context.args[0])
+        dia = int(args[0])
     except (IndexError, ValueError):
         dia = 0
     if not 1 <= dia <= 31:
-        await update.message.reply_text("Uso correto: /fatura [dia do fechamento]. Ex: /fatura 5")
+        whatsapp.enviar_texto(user_id, "Uso correto: /fatura [dia do fechamento]. Ex: /fatura 5")
         return
 
-    loop = asyncio.get_running_loop()
-    if await loop.run_in_executor(None, definir_dia_fatura, dia, user_id):
-        await update.message.reply_text(
+    if definir_dia_fatura(dia, user_id):
+        whatsapp.enviar_texto(
+            user_id,
             f"💳 Anotado: sua fatura fecha todo dia {dia}. "
             f"Novas compras parceladas terão a 1ª parcela prevista para o próximo fechamento."
         )
     else:
-        await update.message.reply_text("Erro ao salvar o dia da fatura.")
+        whatsapp.enviar_texto(user_id, "Erro ao salvar o dia da fatura.")
 
-async def comando_assinaturas(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    loop = asyncio.get_running_loop()
-    texto = await loop.run_in_executor(None, _texto_assinaturas, update.effective_user.id)
-    await update.message.reply_text(texto, parse_mode='Markdown')
 
-async def comando_cancelar_assinatura(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+def comando_assinaturas(user_id, args):
+    whatsapp.enviar_texto(user_id, _texto_assinaturas(user_id))
+
+
+def comando_cancelar_assinatura(user_id, args):
     try:
-        ass_id = int(context.args[0].lstrip('#'))
+        ass_id = int(args[0].lstrip('#'))
     except (IndexError, ValueError):
-        await update.message.reply_text("Uso correto: /cancelarassinatura [número]. Veja os números com /assinaturas.")
+        whatsapp.enviar_texto(user_id, "Uso correto: /cancelarassinatura [número]. Veja os números com /assinaturas.")
         return
 
-    loop = asyncio.get_running_loop()
-    descricao = await loop.run_in_executor(None, cancelar_assinatura, ass_id, user_id)
+    descricao = cancelar_assinatura(ass_id, user_id)
     if descricao:
-        await update.message.reply_text(f"🗑️ Assinatura de '{descricao}' cancelada. As cobranças já registradas foram mantidas.")
+        whatsapp.enviar_texto(user_id, f"🗑️ Assinatura de '{descricao}' cancelada. As cobranças já registradas foram mantidas.")
     else:
-        await update.message.reply_text("Assinatura não encontrada. Veja os números com /assinaturas.")
+        whatsapp.enviar_texto(user_id, "Assinatura não encontrada. Veja os números com /assinaturas.")
 
-async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
-    texto = None
-    arquivo_bytes = None
-    mime_type = None
 
-    if update.message.text:
-        texto = update.message.text
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-    
-    elif update.message.photo:
-        await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
-        foto = await update.message.photo[-1].get_file()
-        byte_array = await foto.download_as_bytearray()
-        arquivo_bytes = bytes(byte_array)
-        mime_type = "image/jpeg"
-        texto = update.message.caption or "Analise este comprovante"
+def comando_menu(user_id, args):
+    whatsapp.enviar_texto(user_id, menu_comandos())
 
-    elif update.message.voice:
-        await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
-        voz = await update.message.voice.get_file()
-        byte_array = await voz.download_as_bytearray()
-        arquivo_bytes = bytes(byte_array)
-        mime_type = "audio/ogg"
-        texto = "Transcreva o áudio e analise o gasto"
 
-    loop = asyncio.get_running_loop()
-    contexto = await loop.run_in_executor(None, contexto_financeiro, user_id)
-    resultado = await loop.run_in_executor(None, brain.interpretar_mensagem, texto, arquivo_bytes, mime_type, contexto)
+def comando_ajuda(user_id, args):
+    whatsapp.enviar_texto(user_id, TEXTO_AJUDA)
+
+
+def comando_resumo(user_id, args):
+    processar_entrada(user_id, "resumo")
+
+
+def comando_exportar(user_id, args):
+    processar_entrada(user_id, "exportar")
+
+
+def comando_meuid(user_id, args):
+    whatsapp.enviar_texto(user_id, f"Seu identificador neste canal é: {user_id}")
+
+
+COMANDOS = {
+    'menu': comando_menu,
+    'comandos': comando_menu,
+    'ajuda': comando_ajuda,
+    'resumo': comando_resumo,
+    'exportar': comando_exportar,
+    'meuid': comando_meuid,
+    'start': comando_start,
+    'meta': comando_definir_meta,
+    'parcelas': comando_parcelas,
+    'cancelarparcela': comando_cancelar_parcela,
+    'fatura': comando_fatura,
+    'assinaturas': comando_assinaturas,
+    'cancelarassinatura': comando_cancelar_assinatura,
+}
+
+
+# ---------------------------------------------------------------------------
+# Fluxo principal de mensagem
+# ---------------------------------------------------------------------------
+
+def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
+    contexto = contexto_financeiro(user_id)
+    resultado = brain.interpretar_mensagem(texto, arquivo_bytes, mime_type, contexto,
+                                         contexto_temporal=assistente_pessoal.contexto(user_id))
 
     if not resultado:
-        await context.bot.send_message(chat_id=chat_id, text="Não entendi. Tente ser mais claro.")
+        whatsapp.enviar_texto(user_id, "Não entendi. Tente ser mais claro.")
+        return
+
+    if assistente_pessoal.executar_intencao(user_id, resultado):
         return
 
     intencao = resultado.get("intencao")
 
     if intencao == "erro_api":
-        await context.bot.send_message(
-            chat_id=chat_id, 
-            text="Desculpe, o serviço de inteligência artificial está temporariamente indisponível. Tente novamente em alguns minutos."
+        whatsapp.enviar_texto(
+            user_id,
+            "Desculpe, o serviço de inteligência artificial está temporariamente indisponível. Tente novamente em alguns minutos."
         )
         return
 
     if intencao == "conversa":
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=resultado.get("resposta") or "Oi! 👋 Como posso ajudar?"
-        )
+        whatsapp.enviar_texto(user_id, resultado.get("resposta") or "Oi! 👋 Como posso ajudar?")
         return
 
     if intencao == "transacao":
         dados = resultado["dados"]
         if not dados.get('valor'):
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="Não identifiquei o valor. Pode repetir com o número? Ex: 'Gastei 50 no mercado'."
+            whatsapp.enviar_texto(
+                user_id,
+                "Não identifiquei o valor. Pode repetir com o número? Ex: 'Gastei 50 no mercado'."
             )
             return
         dados['categoria'] = dados['categoria'].capitalize()
@@ -706,43 +770,38 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
         eh_assinatura = bool(dados.pop('assinatura', False))
 
         if parcelas > 1:
-            resultado_parc = await loop.run_in_executor(None, criar_parcelamento, dados, parcelas, user_id)
+            resultado_parc = criar_parcelamento(dados, parcelas, user_id)
             if not resultado_parc:
-                await context.bot.send_message(chat_id=chat_id, text="Erro ao salvar no banco.")
+                whatsapp.enviar_texto(user_id, "Erro ao salvar no banco.")
                 return
             primeira, tem_fatura = resultado_parc
             dica_fatura = "" if tem_fatura else (
                 "\n\n💡 Me diga o dia que sua fatura fecha com /fatura [dia] e eu acerto as datas."
             )
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"📆 *Compra parcelada anotada!*\n\n"
-                    f"📝 {dados['descricao']}\n"
-                    f"💵 *{parcelas}x de {_fmt_reais(dados['valor'])}*\n"
-                    f"📂 {dados['categoria']}  ·  💳 {dados['metodo_pagamento']}\n"
-                    f"🗓️ 1ª parcela prevista para {primeira.strftime('%d/%m/%Y')} — nada entrou nos "
-                    f"gastos deste mês; registro e aviso quando cada parcela cair. Veja com /parcelas"
-                    f"{dica_fatura}"
-                ),
-                parse_mode='Markdown'
+            whatsapp.enviar_texto(
+                user_id,
+                f"📆 *Compra parcelada anotada!*\n\n"
+                f"📝 {dados['descricao']}\n"
+                f"💵 *{parcelas}x de {_fmt_reais(dados['valor'])}*\n"
+                f"📂 {dados['categoria']}  ·  💳 {dados['metodo_pagamento']}\n"
+                f"🗓️ 1ª parcela prevista para {primeira.strftime('%d/%m/%Y')} — nada entrou nos "
+                f"gastos deste mês; registro e aviso quando cada parcela cair. Veja com /parcelas"
+                f"{dica_fatura}"
             )
             return
 
         info_parcelas = ""
         if eh_assinatura:
-            if await loop.run_in_executor(None, criar_assinatura, dados, user_id):
+            if criar_assinatura(dados, user_id):
                 info_parcelas = (
                     "\n🔄 *Assinatura salva!* Registrei a cobrança deste mês e vou "
                     "renovar e registrar automaticamente todo mês. Veja com /assinaturas"
                 )
 
-        sucesso = await loop.run_in_executor(None, salvar_transacao, dados, user_id)
-
-        if sucesso:
+        if salvar_transacao(dados, user_id):
             alerta = ""
             if dados['tipo'] == 'Saida':
-                alerta = await loop.run_in_executor(None, progresso_meta, dados['categoria'], user_id)
+                alerta = progresso_meta(dados['categoria'], user_id)
 
             if dados['tipo'] == 'Entrada':
                 cabecalho = "💰 *Entrada registrada!*"
@@ -759,12 +818,11 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             msg = "Erro ao salvar no banco."
-        
-        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+
+        whatsapp.enviar_texto(user_id, msg)
 
     elif intencao == "assinaturas":
-        texto_ass = await loop.run_in_executor(None, _texto_assinaturas, user_id)
-        await context.bot.send_message(chat_id=chat_id, text=texto_ass, parse_mode='Markdown')
+        whatsapp.enviar_texto(user_id, _texto_assinaturas(user_id))
 
     elif intencao == "resumo":
         meses_pt = {
@@ -775,74 +833,123 @@ async def processar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hoje = datetime.now()
         mes_nome = f"{meses_pt[hoje.month]}/{hoje.year}"
 
-        await context.bot.send_message(chat_id=chat_id, text=f"📊 Gerando Dashboard de {mes_nome}...")
-        
-        transacoes = await loop.run_in_executor(None, buscar_transacoes_mes_atual, user_id)
-        
-        if not transacoes:
-            await context.bot.send_message(chat_id=chat_id, text=f"Nenhum dado encontrado neste mês ({mes_nome}).")
-            return
-        
-        metas = await loop.run_in_executor(None, buscar_metas, user_id)
-        imagem = await loop.run_in_executor(None, gerar_dashboard_completo, transacoes, metas, mes_nome)
+        whatsapp.enviar_texto(user_id, f"📊 Gerando Dashboard de {mes_nome}...")
 
-        await context.bot.send_photo(chat_id=chat_id, photo=imagem)
+        transacoes = buscar_transacoes_mes_atual(user_id)
+        if not transacoes:
+            whatsapp.enviar_texto(user_id, f"Nenhum dado encontrado neste mês ({mes_nome}).")
+            return
+
+        imagem = gerar_dashboard_completo(transacoes, buscar_metas(user_id), mes_nome)
+        whatsapp.enviar_midia(user_id, imagem, 'image/png', 'dashboard.png', 'image')
 
     elif intencao == "exportacao":
-        await context.bot.send_message(chat_id=chat_id, text="📂 Gerando planilha...")
-        
-        arquivo_excel = await loop.run_in_executor(None, gerar_arquivo_excel, user_id)
-        
+        whatsapp.enviar_texto(user_id, "📂 Gerando planilha...")
+
+        arquivo_excel = gerar_arquivo_excel(user_id)
         if arquivo_excel:
-            await context.bot.send_document(
-                chat_id=chat_id,
-                document=arquivo_excel,
-                filename="financas_pessoais.xlsx",
-                caption="Seu extrato completo! 📊"
+            whatsapp.enviar_midia(
+                user_id, arquivo_excel,
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'financas_pessoais.xlsx', 'document', "Seu extrato completo! 📊"
             )
         else:
-            await context.bot.send_message(chat_id=chat_id, text="Erro ao exportar arquivo.")
+            whatsapp.enviar_texto(user_id, "Erro ao exportar arquivo.")
 
     elif intencao == "ajuda":
-        msg_ajuda = (
-            "**Minhas Funcionalidades:**\n\n"
-            "1️⃣ **Registrar Transações:**\n"
-            "   📝 Texto: 'Gastei 50 no mercado'\n"
-            "   📸 Foto: Envie comprovante\n"
-            "   🎙️ Áudio: Fale seu gasto\n\n"
-            "2️⃣ **Compras Parceladas:**\n"
-            "   📆 'Comprei uma TV em 10x de 200' — registro cada parcela no mês em que ela cai\n"
-            "   💳 /fatura [dia] — informe o fechamento da fatura para acertar as datas\n"
-            "   Veja com /parcelas | Cancele com /cancelarparcela [número]\n\n"
-            "3️⃣ **Assinaturas (gastos fixos):**\n"
-            "   🔄 'Assinei Netflix por 39,90' — registro e renovo todo mês\n"
-            "   Veja com /assinaturas | Cancele com /cancelarassinatura [número]\n\n"
-            "4️⃣ **Gestão de Metas:**\n"
-            "   🎯 Use /meta [Categoria] [Valor]\n"
-            "   Ex: /meta Alimentacao 500\n\n"
-            "5️⃣ **Análises:**\n"
-            "   📊 Peça: 'Me dê um resumo' para ver gráficos e saldo\n\n"
-            "6️⃣ **Exportação:**\n"
-            "   📂 Peça: 'Exportar planilha' para receber o Excel"
-        )
-        await context.bot.send_message(chat_id=chat_id, text=msg_ajuda, parse_mode='Markdown')
+        whatsapp.enviar_texto(user_id, TEXTO_AJUDA)
+
+
+def tratar_mensagem(user_id, texto, arquivo_bytes=None, mime_type=None):
+    if texto and texto.startswith('/') and not arquivo_bytes:
+        partes = texto.split()
+        if assistente_pessoal.comando(user_id, partes[0][1:].lower(), partes[1:]):
+            return
+        comando = COMANDOS.get(partes[0][1:].lower())
+        if comando:
+            comando(user_id, partes[1:])
+        else:
+            whatsapp.enviar_texto(user_id, menu_comandos(partes[0][1:].lower()))
+        return
+    processar_entrada(user_id, texto, arquivo_bytes, mime_type)
+
+
+# ---------------------------------------------------------------------------
+# Webhook da Evolution API
+# ---------------------------------------------------------------------------
+
+# Vazio = qualquer número pode falar com o bot. Preencha para restringir.
+PERMITIDOS = {n.strip() for n in os.getenv("NUMEROS_PERMITIDOS", "").split(",") if n.strip()}
+# Segredo no path: sem ele, qualquer um que ache o IP do VPS manda o bot disparar mensagem.
+WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "trocar-esse-token")
+
+
+def extrair_mensagem(payload):
+    """Evento messages.upsert -> (user_id, texto, key_da_midia, mime). None = ignorar."""
+    dados = payload.get('data') or {}
+    key = dados.get('key') or {}
+    jid = key.get('remoteJid') or ''
+
+    # fromMe evita o bot responder ao próprio eco; @s.whatsapp.net = conversa 1:1, sem grupos
+    if key.get('fromMe') or not jid.endswith('@s.whatsapp.net'):
+        return None
+
+    numero = jid.split('@')[0]
+    if not numero.isdigit() or (PERMITIDOS and numero not in PERMITIDOS):
+        return None
+    user_id = int(numero)
+
+    msg = dados.get('message') or {}
+    if 'imageMessage' in msg:
+        legenda = msg['imageMessage'].get('caption') or "Analise este comprovante"
+        return user_id, legenda, key, 'image/jpeg'
+    if 'audioMessage' in msg:
+        return user_id, "Transcreva o áudio e analise o gasto", key, 'audio/ogg'
+
+    texto = msg.get('conversation') or (msg.get('extendedTextMessage') or {}).get('text')
+    if not texto:
+        return None
+    return user_id, texto.strip(), None, None
+
+
+def _atender(user_id, texto, key_midia, mime_type):
+    """Roda fora do request: baixar mídia + chamar a IA leva segundos."""
+    try:
+        arquivo_bytes = whatsapp.baixar_midia(key_midia) if key_midia else None
+        tratar_mensagem(user_id, texto, arquivo_bytes, mime_type)
+    except Exception:
+        # sem isso a exceção morre calada dentro da thread
+        logging.exception("Erro ao atender %s", user_id)
+        try:
+            whatsapp.enviar_texto(user_id, "Deu erro aqui do meu lado. Pode tentar de novo?")
+        except Exception:
+            logging.exception("Falha ao avisar o usuário %s do erro", user_id)
+
+
+servidor = Flask(__name__)
+
+
+@servidor.get('/')
+def home():
+    return "Jarvis está online!"
+
+
+@servidor.post(f'/webhook/{WEBHOOK_TOKEN}')
+def webhook():
+    if whatsapp.canal() != "whatsapp":
+        return '', 404
+    mensagem = extrair_mensagem(request.get_json(silent=True) or {})
+    if mensagem:
+        threading.Thread(target=_atender, args=mensagem, daemon=True).start()
+    return '', 200  # 200 imediato: a Evolution reenvia se a resposta demorar
+
 
 if __name__ == '__main__':
-    token = os.getenv("TELEGRAM_TOKEN")
-    app = ApplicationBuilder().token(token).post_init(iniciar_tarefas).build()
-
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('meta', comando_definir_meta))
-    app.add_handler(CommandHandler('parcelas', comando_parcelas))
-    app.add_handler(CommandHandler('cancelarparcela', comando_cancelar_parcela))
-    app.add_handler(CommandHandler('fatura', comando_fatura))
-    app.add_handler(CommandHandler('assinaturas', comando_assinaturas))
-    app.add_handler(CommandHandler('cancelarassinatura', comando_cancelar_assinatura))
-    
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), processar_entrada))
-    app.add_handler(MessageHandler(filters.PHOTO, processar_entrada))
-    app.add_handler(MessageHandler(filters.VOICE, processar_entrada))
-    
-    print("Jarvis seu assistente financeiro está online no telegram!")
-    manter_vivo()
-    app.run_polling()
+    canal = whatsapp.canal()
+    if canal == "telegram":
+        bot_username = telegram.preparar()
+        threading.Thread(target=telegram.vigiar, args=(_atender, bot_username), daemon=True).start()
+    threading.Thread(target=vigiar_recorrencias, daemon=True).start()
+    threading.Thread(target=assistente_pessoal.vigiar, daemon=True).start()
+    print(f"Jarvis online no {canal}")
+    servidor.run(host='0.0.0.0', port=int(os.getenv("PORT", 8000)), threaded=True)

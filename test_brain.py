@@ -62,6 +62,18 @@ class OpenRouterTests(unittest.TestCase):
             self.assertEqual(brain.interpretar_mensagem("resumo"), {"intencao": "resumo"})
         self.post.assert_not_called()
 
+    def test_resumo_diario_e_lembretes_nao_caem_no_resumo_financeiro(self):
+        self.assertEqual(brain.interpretar_mensagem("resumo diário"), {"intencao": "hoje"})
+        self.assertEqual(brain.interpretar_mensagem("meus lembretes"), {"intencao": "lembretes"})
+        brain.interpretar_mensagem("ative resumo diário às 8h", contexto_temporal="2026-10-21T08:00:00-03:00")
+        self.post.assert_called_once()
+        texto = self.post.call_args.kwargs["json"]["messages"][0]["content"][0]["text"]
+        self.assertIn("2026-10-21T08:00:00-03:00", texto)
+
+    def test_lembrete_com_dinheiro_vai_para_interpretacao(self):
+        brain.interpretar_mensagem("Me lembra de pagar 50 reais amanhã às 9h")
+        self.post.assert_called_once()
+
     def test_configuracao_ausente_nao_chama_api(self):
         for variavel in ("OPENROUTER_API_KEY", "OPENROUTER_MODEL"):
             with self.subTest(variavel=variavel), patch.dict(os.environ, {variavel: " "}):
