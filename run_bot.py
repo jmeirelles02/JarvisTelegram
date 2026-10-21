@@ -729,6 +729,10 @@ COMANDOS = {
 # ---------------------------------------------------------------------------
 
 def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
+    if texto and not arquivo_bytes:
+        consulta = assistente_pessoal.consulta_rapida(user_id, texto)
+        if consulta and assistente_pessoal.executar_intencao(user_id, consulta):
+            return
     contexto = contexto_financeiro(user_id)
     resultado = brain.interpretar_mensagem(texto, arquivo_bytes, mime_type, contexto,
                                          contexto_temporal=assistente_pessoal.contexto(user_id))

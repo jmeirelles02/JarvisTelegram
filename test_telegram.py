@@ -53,6 +53,31 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(arquivo.tell(), 0)
         self.assertEqual(self.post.call_args.kwargs["files"]["document"][0], "extrato.xlsx")
 
+    def test_negrito_real_sem_asteriscos_e_offsets_corretos_com_emoji(self):
+        telegram.enviar_texto(123, "📅 *Sexta-feira*\n\n*10:20* · Psicólogo <consulta> & equipe")
+        payload = self.post.call_args.kwargs["json"]
+        self.assertEqual(payload["text"], "📅 Sexta-feira\n\n10:20 · Psicólogo <consulta> & equipe")
+        for entidade in payload["entities"]:
+            codificado = payload["text"].encode("utf-16-le")
+            comeco = entidade["offset"] * 2
+            termino = comeco + entidade["length"] * 2
+            conteudo = codificado[comeco:termino].decode("utf-16-le")
+            self.assertIn(conteudo, {"Sexta-feira", "10:20"})
+        self.assertNotIn("parse_mode", payload)
+
+    def test_fragmentacao_preserva_negrito_e_limites_utf16(self):
+        telegram.enviar_texto(123, "*" + "📅" * 2100 + "*")
+        self.assertEqual(self.post.call_count, 2)
+        for chamada in self.post.call_args_list:
+            payload = chamada.kwargs["json"]
+            tamanho = len(payload["text"].encode("utf-16-le")) // 2
+            self.assertLessEqual(tamanho, 4000)
+            self.assertEqual(payload["entities"], [{"type": "bold", "offset": 0, "length": tamanho}])
+
+    def test_asteriscos_literais_nao_sao_removidos(self):
+        telegram.enviar_texto(123, "3 * 5 * 2 e um * isolado")
+        self.assertEqual(self.post.call_args.kwargs["json"]["text"], "3 * 5 * 2 e um * isolado")
+
     def test_download_midia(self):
         self.post.return_value.json.return_value = {"ok": True, "result": {"file_path": "voice/file.ogg"}}
         with patch.object(telegram.requests, "get") as get:

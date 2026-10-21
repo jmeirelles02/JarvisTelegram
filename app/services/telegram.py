@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import threading
 
 import requests
@@ -38,9 +39,53 @@ def _chamar(metodo, dados=None, arquivos=None, timeout=60):
     return conteudo.get("result")
 
 
+def _tamanho_utf16(texto):
+    return len(texto.encode("utf-16-le")) // 2
+
+
+def _formatar_texto(texto):
+    partes = []
+    entidades = []
+    posicao = 0
+    tamanho = 0
+    padrao = r"(?<![\w*])(?P<marca>\*{1,2})(?P<conteudo>[^\s*](?:[^*\n]*[^\s*])?)(?P=marca)(?![\w*])"
+    for trecho in re.finditer(padrao, texto):
+        prefixo = texto[posicao:trecho.start()]
+        conteudo = trecho.group("conteudo")
+        partes.extend((prefixo, conteudo))
+        tamanho += _tamanho_utf16(prefixo)
+        entidades.append({"type": "bold", "offset": tamanho, "length": _tamanho_utf16(conteudo)})
+        tamanho += _tamanho_utf16(conteudo)
+        posicao = trecho.end()
+    partes.append(texto[posicao:])
+    return "".join(partes), entidades
+
+
 def enviar_texto(numero, texto):
-    for inicio in range(0, len(texto), 4000):
-        _chamar("sendMessage", {"chat_id": numero, "text": texto[inicio:inicio + 4000]})
+    texto, entidades = _formatar_texto(texto)
+    inicio = 0
+    offset = 0
+    while inicio < len(texto):
+        fim = inicio
+        tamanho = 0
+        while fim < len(texto):
+            unidades = 2 if ord(texto[fim]) > 0xFFFF else 1
+            if tamanho + unidades > 4000:
+                break
+            tamanho += unidades
+            fim += 1
+        locais = []
+        for entidade in entidades:
+            comeco = max(offset, entidade["offset"])
+            termino = min(offset + tamanho, entidade["offset"] + entidade["length"])
+            if comeco < termino:
+                locais.append({"type": entidade["type"], "offset": comeco - offset, "length": termino - comeco})
+        payload = {"chat_id": numero, "text": texto[inicio:fim]}
+        if locais:
+            payload["entities"] = locais
+        _chamar("sendMessage", payload)
+        inicio = fim
+        offset += tamanho
 
 
 def enviar_midia(numero, buffer, mimetype, nome_arquivo, tipo, legenda=""):

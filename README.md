@@ -100,6 +100,10 @@ JARVIS_TIMEZONE=America/Sao_Paulo
 
 O Jarvis consulta conflitos antes de pedir confirmação. A confirmação permite criar mesmo com conflito. Nesta versão, consulta e criação usam somente a agenda escolhida; edição, exclusão e convite de participantes não estão incluídos. Compromissos existentes também geram avisos no canal ativo 30 minutos antes; eventos criados pelo Jarvis usam a antecedência pedida. Eventos de dia inteiro entram na agenda e no resumo, sem aviso automático no chat.
 
+Consultas simples como `O que tenho para fazer sexta?`, `Qual minha agenda de amanhã?` e `Agenda desta semana` são resolvidas localmente, sem chamada à IA nem consulta ao histórico financeiro. Datas relativas usam o fuso do usuário; `sexta` inclui hoje quando hoje é sexta, enquanto `próxima sexta` indica a seguinte. Pedidos mais complexos continuam disponíveis pela IA. Os eventos são consultados no calendário a cada pedido.
+
+A agenda apresenta o dia da semana e a data, com uma linha por compromisso, horários destacados e agrupamento por dia quando o período é maior. O horário técnico `00:00` do intervalo de busca não aparece no cabeçalho. No Telegram, o negrito é enviado como entidades de formatação, sem exibir os asteriscos.
+
 As credenciais são configuradas no servidor, nunca pelo chat ou em prompts da IA. A integração fica disponível somente ao usuário `CALENDAR_USER_ID`, mesmo se a lista geral de usuários permitidos estiver vazia. No Telegram, use o ID retornado por `/meuid`; no WhatsApp, use o telefone com DDI+DDD+número. Não publique a agenda nem use a senha principal da Apple.
 
 ### Google Calendar (alternativa)
@@ -124,7 +128,7 @@ As chaves únicas e bloqueios de linha evitam a criação duplicada de entregas 
 
 ### Testes do assistente pessoal
 
-`python -m unittest test_brain.py test_personal.py test_calendar.py test_command_menu.py test_telegram.py` valida interpretação, agendamentos, isolamento por usuário, persistência, retentativas, menus, transporte Telegram e adaptadores de calendário com mocks. Não usa banco de produção, contas reais ou mensagens reais. A conexão real precisa ser validada após configurar as credenciais.
+`python -m unittest test_brain.py test_personal.py test_calendar.py test_command_menu.py test_telegram.py test_agenda.py` valida interpretação, consultas rápidas, apresentação da agenda, formatação do Telegram, agendamentos, isolamento por usuário, persistência, retentativas, menus e adaptadores de calendário com mocks. Não usa banco de produção, contas reais ou mensagens reais. A conexão real precisa ser validada após configurar as credenciais.
 
 ## Estrutura financeira do banco de dados
 

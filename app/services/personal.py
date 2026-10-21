@@ -7,7 +7,7 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy.exc import IntegrityError
 
 from app import models
-from app.services import calendar_service
+from app.services import agenda, calendar_service
 from app.services.personal_time import (
     agora_utc, formatar_data, fuso_padrao, ler_data, utc, validar_fuso, validar_horario,
 )
@@ -71,6 +71,11 @@ class AssistentePessoal:
         fuso = self.fuso(user_id)
         local = agora_utc().astimezone(validar_fuso(fuso))
         return f"Data/hora atual: {local.isoformat()}; dia da semana: {local.strftime('%A')}; fuso: {fuso}."
+
+    def consulta_rapida(self, user_id, texto):
+        if agenda.periodo_consulta(texto) is None:
+            return None
+        return agenda.interpretar_consulta(texto, self.fuso(user_id))
 
     def criar_lembrete(self, user_id, dados, agora=None):
         agora = agora or agora_utc()
@@ -163,15 +168,10 @@ class AssistentePessoal:
         if not inicio < fim <= inicio + timedelta(days=31):
             raise ValueError("Consulte um intervalo entre 1 minuto e 31 dias.")
         eventos = self.calendario_factory(user_id).listar(inicio, fim, fuso)
-        linhas = [f"📅 *Agenda: {formatar_data(inicio, fuso)} até {formatar_data(fim, fuso)}*"]
-        linhas.extend(self._linhas_eventos(eventos, fuso))
-        return "\n".join(linhas)
+        return agenda.formatar_agenda(eventos, inicio, fim, fuso)
 
     def _linhas_eventos(self, eventos, fuso):
-        if not eventos:
-            return ["Nenhum compromisso nesse período."]
-        return [f"• {formatar_data(evento.inicio, fuso)}{' (dia inteiro)' if evento.dia_inteiro else ''} · {evento.titulo}"
-                for evento in eventos]
+        return agenda.linhas_eventos(eventos, fuso, agrupar=False)
 
     def preparar_evento(self, user_id, dados, agora=None):
         agora = agora or agora_utc()
@@ -344,7 +344,8 @@ class AssistentePessoal:
             elif comando == "agenda":
                 mensagem = self.agenda(user_id)
             elif comando == "calendarios":
-                mensagem = "📅 Calendários: " + ", ".join(self.calendario_factory(user_id).listar_calendarios())
+                nomes = self.calendario_factory(user_id).listar_calendarios()
+                mensagem = "📅 *Seus calendários*\n\n" + "\n".join(f"• {nome}" for nome in nomes)
             elif comando in {"confirmar", "descartar"}:
                 if len(args) != 1:
                     raise ValueError(f"Use /{comando} ID com o número do pedido de evento.")

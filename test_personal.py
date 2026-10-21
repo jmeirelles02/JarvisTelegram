@@ -250,6 +250,20 @@ class AssistenteTests(unittest.TestCase):
         interpretar.assert_not_called()
         self.assertIn("Seu dia", self.enviar.call_args.args[1])
 
+    def test_consulta_sexta_bypassa_ia_e_contexto_financeiro(self):
+        import run_bot
+
+        with patch.object(run_bot, "assistente_pessoal", self.assistente), \
+                patch.object(run_bot, "contexto_financeiro") as financeiro, \
+                patch.object(run_bot.brain, "interpretar_mensagem") as interpretar, \
+                patch("app.services.agenda.agora_utc", return_value=self.agora):
+            run_bot.processar_entrada(10, "Oque tenho para fazer sexta?")
+        interpretar.assert_not_called()
+        financeiro.assert_not_called()
+        self.calendario.listar.assert_called_once_with(
+            datetime(2026, 10, 23, 3, tzinfo=UTC), datetime(2026, 10, 24, 3, tzinfo=UTC), "America/Sao_Paulo")
+        self.assertIn("Sexta-feira", self.enviar.call_args.args[1])
+
 
 if __name__ == "__main__":
     unittest.main()
