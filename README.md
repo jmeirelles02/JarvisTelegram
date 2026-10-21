@@ -43,7 +43,13 @@ O sistema aceita inputs variados, reduzindo o atrito do usuário ao registrar ga
 
 ### 2. Dashboard Mensal Dinâmico
 
-O bot gera relatórios visuais sob demanda. A lógica de filtragem foi implementada para isolar transações baseadas no mês e ano correntes, garantindo que o usuário tenha uma visão atualizada da sua saúde financeira.
+O comando `/resumo` envia uma leitura curta dos registros do mês e um painel em formato retrato. O período respeita o fuso configurado pelo usuário, inclusive nas viradas de mês.
+
+O painel mostra entradas, saídas e resultado; a participação dos gastos por categoria; a evolução acumulada por dia; os limites de gastos com valores disponíveis ou excedidos; e a composição por forma de pagamento e origem das entradas. Títulos e legendas explicam o que cada gráfico mede. Categorias adicionais são agrupadas, preservando os totais. O resultado representa entradas menos saídas registradas, e não um saldo bancário consultado.
+
+### Padrão das respostas
+
+Confirmações, listas, lembretes, avisos, comandos, erros e o resumo diário usam títulos curtos, espaços entre assuntos e uma ação clara quando necessária. Valores seguem o formato `R$ 1.234,56`, com nomes legíveis como Alimentação e Crédito. O resumo diário separa agenda, lembretes, cobranças, finanças e metas. As conversas geradas pela IA também recebem instruções para seguir esse estilo, sem tabelas ou excesso de emojis.
 
 ### 3. Compras Parceladas
 
@@ -128,7 +134,7 @@ As chaves únicas e bloqueios de linha evitam a criação duplicada de entregas 
 
 ### Testes do assistente pessoal
 
-`python -m unittest test_brain.py test_personal.py test_calendar.py test_command_menu.py test_telegram.py test_agenda.py` valida interpretação, consultas rápidas, apresentação da agenda, formatação do Telegram, agendamentos, isolamento por usuário, persistência, retentativas, menus e adaptadores de calendário com mocks. Não usa banco de produção, contas reais ou mensagens reais. A conexão real precisa ser validada após configurar as credenciais.
+`python -m unittest test_brain.py test_personal.py test_calendar.py test_command_menu.py test_telegram.py test_agenda.py test_reports.py` valida interpretação, consultas rápidas, apresentação das respostas, formatação do Telegram, cálculos e renderização do resumo, agendamentos, isolamento por usuário, persistência, retentativas, menus e adaptadores de calendário com mocks. Não usa banco de produção, contas reais ou mensagens reais. A conexão real precisa ser validada após configurar as credenciais.
 
 ## Estrutura financeira do banco de dados
 

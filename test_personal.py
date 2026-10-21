@@ -147,8 +147,8 @@ class AssistenteTests(unittest.TestCase):
             ])
         texto, relevante = self.assistente.resumo(10, self.agora)
         self.assertTrue(relevante)
-        self.assertIn("50.00", texto)
-        self.assertIn("150.00", texto)
+        self.assertIn("R$ 50,00", texto)
+        self.assertIn("R$ 150,00", texto)
         self.assertNotIn("999", texto)
 
     def test_evento_exige_confirmacao_informa_conflitos_e_nao_duplica(self):
@@ -263,6 +263,42 @@ class AssistenteTests(unittest.TestCase):
         self.calendario.listar.assert_called_once_with(
             datetime(2026, 10, 23, 3, tzinfo=UTC), datetime(2026, 10, 24, 3, tzinfo=UTC), "America/Sao_Paulo")
         self.assertIn("Sexta-feira", self.enviar.call_args.args[1])
+
+    def test_relatorio_mensal_usa_limites_do_fuso_e_isola_usuario(self):
+        import run_bot
+
+        with self.sessions.begin() as session:
+            session.add_all([
+                models.Transacao(user_id=10, valor=99, tipo="Saida", categoria="Casa", data=datetime(2026, 10, 1, 2, tzinfo=UTC)),
+                models.Transacao(user_id=10, valor=50, tipo="Saida", categoria="Casa", data=datetime(2026, 10, 1, 3, tzinfo=UTC)),
+                models.Transacao(user_id=11, valor=100, tipo="Saida", categoria="Casa", data=self.agora),
+                models.Transacao(user_id=10, valor=60, tipo="Saida", categoria="Casa", data=datetime(2026, 11, 1, 3, tzinfo=UTC)),
+            ])
+        with patch.object(run_bot, "assistente_pessoal", self.assistente), \
+                patch.object(run_bot.database, "SessionLocal", self.sessions), \
+                patch.object(run_bot, "agora_utc", return_value=self.agora):
+            valores = [item.valor for item in run_bot.buscar_transacoes_mes_atual(10)]
+        self.assertEqual(valores, [50])
+
+    def test_resumo_envia_explicacao_e_grafico_sem_mensagem_de_espera(self):
+        import run_bot
+        from test_reports import exemplo
+
+        transacoes, metas = exemplo()
+        with patch.object(run_bot, "assistente_pessoal", self.assistente), \
+                patch.object(run_bot, "contexto_financeiro", return_value=""), \
+                patch.object(run_bot.brain, "interpretar_mensagem", return_value={"intencao": "resumo"}), \
+                patch.object(run_bot, "buscar_transacoes_mes_atual", return_value=transacoes), \
+                patch.object(run_bot, "buscar_metas", return_value=metas), \
+                patch.object(run_bot, "gerar_dashboard_completo", return_value=b"image"), \
+                patch.object(run_bot.whatsapp, "enviar_texto") as texto, \
+                patch.object(run_bot.whatsapp, "enviar_midia") as midia:
+            run_bot.processar_entrada(10, "resumo")
+        texto.assert_called_once()
+        self.assertIn("R$ 3.905,10", texto.call_args.args[1])
+        self.assertIn("Maior gasto", texto.call_args.args[1])
+        self.assertNotIn("Gerando", texto.call_args.args[1])
+        midia.assert_called_once()
 
 
 if __name__ == "__main__":

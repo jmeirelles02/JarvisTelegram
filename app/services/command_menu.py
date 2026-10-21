@@ -47,12 +47,10 @@ def menu_comandos(prefixo=""):
         linhas.append(f"\n*{grupo}*")
         for nome, argumentos, descricao in correspondentes:
             uso = f"/{nome}" + (f" {argumentos}" if argumentos else "")
-            linhas.append(f"{uso} — {descricao}")
+            linhas.append(f"{uso}\n{descricao}\n")
     if not encontrados:
         return "Comando não encontrado. Envie / ou /menu para ver todas as opções."
-    linhas.append("\nEnvie o comando desejado, preenchendo os argumentos quando houver.")
+    linhas.append("Envie o comando com os argumentos indicados. ID é o número mostrado na lista.")
     if not prefixo:
-        linhas.append("Para filtrar opções, envie um prefixo, como /ca.\n"
-                      "Para criar: 'Me lembra de pagar a internet amanhã às 9h' ou "
-                      "'Marca dentista amanhã das 15h às 16h'.")
-    return "\n".join(linhas)
+        linhas.append("Filtrar opções: /ca · Exemplos de pedidos: /ajuda")
+    return "\n".join(linhas).strip()

@@ -3,22 +3,18 @@ import io
 import time
 import logging
 import threading
-import matplotlib
-
-matplotlib.use('Agg')  # VPS/container não tem display: backend headless antes do pyplot
-import matplotlib.pyplot as plt
-
-plt.rcParams['text.parse_math'] = False  # sem isso, "R$ x ... R$ y" vira fórmula matemática
 import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from flask import Flask, request
-from sqlalchemy import func, extract
-from app.services import brain, telegram, transport as whatsapp
+from app.services import brain, telegram, transport as whatsapp, presentation as visual
 from app import models, database
 from app.services.personal import AssistentePessoal
 from app.services.command_menu import menu_comandos
+from app.services.reports import gerar_dashboard as gerar_dashboard_completo, texto_resumo, somar_por as _somar_por
+from app.services.presentation import moeda as _fmt_reais
+from app.services.personal_time import agora_utc, utc, validar_fuso
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -166,21 +162,7 @@ def cancelar_assinatura(ass_id, user_id):
         session.close()
 
 def _texto_assinaturas(user_id):
-    assinaturas = listar_assinaturas(user_id)
-    if not assinaturas:
-        return (
-            "Nenhuma assinatura salva.\n"
-            "Para criar, diga algo como: 'Assinei Netflix por 39,90 no crédito'."
-        )
-    linhas = ["🔄 *Suas assinaturas:*\n"]
-    for a in assinaturas:
-        linhas.append(
-            f"*#{a.id}* {a.descricao} — {_fmt_reais(a.valor)}/mês "
-            f"(renova {a.proxima_data.strftime('%d/%m/%Y')})"
-        )
-    linhas.append(f"\n💰 Total fixo mensal: *{_fmt_reais(sum(a.valor for a in assinaturas))}*")
-    linhas.append("Para cancelar uma: /cancelarassinatura [número]")
-    return "\n".join(linhas)
+    return visual.lista_assinaturas(listar_assinaturas(user_id))
 
 def processar_assinaturas_devidas():
     """Registra as assinaturas que renovaram e devolve os avisos [(user_id, msg)]."""
@@ -200,12 +182,10 @@ def processar_assinaturas_devidas():
                 tipo='Saida',
             ))
             ass.proxima_data = ass.proxima_data + relativedelta(months=1)
-            avisos.append((ass.user_id, (
-                f"🔄 *Assinatura renovada!*\n\n"
-                f"📝 {ass.descricao}\n"
-                f"💰 {_fmt_reais(ass.valor)}\n"
-                f"📅 Próxima renovação: {ass.proxima_data.strftime('%d/%m/%Y')}"
-            )))
+            avisos.append((ass.user_id, visual.mensagem("Assinatura renovada",
+                visual.bloco(_fmt_reais(ass.valor), visual.nome(ass.descricao)),
+                f"Cobrança registrada neste mês.\nPróxima renovação: {ass.proxima_data:%d/%m/%Y}",
+                rodape="Ver assinaturas: /assinaturas")))
         session.commit()
         return avisos
     except Exception as e:
@@ -232,13 +212,11 @@ def processar_parcelas_devidas():
                 metodo_pagamento=parc.metodo_pagamento,
                 tipo='Saida',
             ))
-            msg = (
-                f"📆 *Parcela do mês registrada!*\n\n"
-                f"📝 {parc.descricao} — parcela {parc.parcelas_pagas}/{parc.parcelas_total}\n"
-                f"💰 R$ {parc.valor_parcela:.2f}"
-            )
+            msg = visual.mensagem("Parcela registrada",
+                visual.bloco(_fmt_reais(parc.valor_parcela), visual.nome(parc.descricao),
+                             f"Parcela {parc.parcelas_pagas} de {parc.parcelas_total}"))
             if parc.parcelas_pagas >= parc.parcelas_total:
-                msg += "\n\n✅ Essa foi a última parcela! Parcelamento concluído."
+                msg += "\n\n✓ Parcelamento concluído. Esta foi a última parcela."
                 session.delete(parc)
             else:
                 parc.proxima_data = parc.proxima_data + relativedelta(months=1)
@@ -280,10 +258,6 @@ def definir_meta_db(categoria, valor, user_id):
     finally:
         session.close()
 
-def _barra_progresso(pct):
-    cheios = min(10, int(round(pct / 10)))
-    return "▰" * cheios + "▱" * (10 - cheios)
-
 def progresso_meta(categoria, user_id):
     """Linha visual do progresso da meta da categoria; '' se não houver meta."""
     session = database.SessionLocal()
@@ -292,32 +266,9 @@ def progresso_meta(categoria, user_id):
         if not meta or not meta.valor_limite:
             return ""
 
-        agora = datetime.now()
-        total_gasto = session.query(func.sum(models.Transacao.valor)).filter(
-            models.Transacao.user_id == user_id,
-            models.Transacao.categoria == categoria,
-            models.Transacao.tipo == 'Saida',
-            extract('month', models.Transacao.data) == agora.month,
-            extract('year', models.Transacao.data) == agora.year
-        ).scalar() or 0.0
-
-        pct = (total_gasto / meta.valor_limite) * 100
-
-        if pct >= 100:
-            emoji = "🔴"
-            aviso = f"\n🚨 Meta estourada em {_fmt_reais(total_gasto - meta.valor_limite)}!"
-        elif pct >= 80:
-            emoji = "🟠"
-            aviso = f"\n⚠️ Quase no limite — restam {_fmt_reais(meta.valor_limite - total_gasto)}"
-        else:
-            emoji = "🟢"
-            aviso = ""
-
-        return (
-            f"\n\n{emoji} *Meta de {categoria}:* {pct:.0f}%\n"
-            f"{_barra_progresso(pct)}\n"
-            f"{_fmt_reais(total_gasto)} de {_fmt_reais(meta.valor_limite)}{aviso}"
-        )
+        total_gasto = sum(item.valor for item in buscar_transacoes_mes_atual(user_id)
+                          if item.tipo == 'Saida' and item.categoria == categoria)
+        return visual.aviso_meta(categoria, total_gasto, meta.valor_limite)
     except Exception as e:
         print(f"Erro ao verificar meta: {e}")
         return ""
@@ -342,13 +293,13 @@ def buscar_todas_transacoes(user_id):
 def buscar_transacoes_mes_atual(user_id):
     session = database.SessionLocal()
     try:
-        mes_atual = datetime.now().month
-        ano_atual = datetime.now().year
-        
+        zona = validar_fuso(assistente_pessoal.fuso(user_id))
+        inicio = agora_utc().astimezone(zona).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        fim = inicio + relativedelta(months=1)
         transacoes = session.query(models.Transacao).filter(
             models.Transacao.user_id == user_id,
-            extract('month', models.Transacao.data) == mes_atual,
-            extract('year', models.Transacao.data) == ano_atual
+            models.Transacao.data >= utc(inicio),
+            models.Transacao.data < utc(fim)
         ).all()
         return transacoes
     finally:
@@ -366,7 +317,7 @@ def contexto_financeiro(user_id):
         cats = ", ".join(f"{c} {_fmt_reais(v)}" for c, v in sorted(por_cat.items(), key=lambda kv: -kv[1]))
         partes = [
             f"entradas {_fmt_reais(entradas)}, gastos {_fmt_reais(saidas)}, "
-            f"saldo {_fmt_reais(entradas - saidas)}. Gastos por categoria: {cats or 'nenhum'}."
+            f"resultado dos registros {_fmt_reais(entradas - saidas)}. Gastos por categoria: {cats or 'nenhum'}."
         ]
     assinaturas = listar_assinaturas(user_id)
     if assinaturas:
@@ -398,199 +349,29 @@ def gerar_arquivo_excel(user_id):
     finally:
         session.close()
 
-# Paleta validada (CVD-safe): azul p/ saídas, aqua p/ entradas, vermelho só p/ saldo negativo
-COR_SAIDA = '#2a78d6'
-COR_ENTRADA = '#1baf7a'
-COR_FUNDO = '#fcfcfb'
-COR_TEXTO = '#0b0b0b'
-COR_TEXTO_2 = '#52514e'
-COR_MUTED = '#898781'
-COR_GRADE = '#e1e0d9'
-COR_TRILHO = '#f0efec'
-# Cores de status (reservadas p/ metas, nunca p/ séries)
-STATUS_BOM = '#0ca30c'
-STATUS_ALERTA = '#ec835a'
-STATUS_CRITICO = '#d03b3b'
-COR_SALDO_POSITIVO = '#006300'
-
-def _fmt_reais(valor):
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-def _somar_por(transacoes, atributo):
-    somas = {}
-    for t in transacoes:
-        chave = getattr(t, atributo) or "Outros"
-        somas[chave] = somas.get(chave, 0) + t.valor
-    # crescente: no barh o último item fica no topo, então o maior valor fica em cima
-    return dict(sorted(somas.items(), key=lambda kv: kv[1]))
-
-def _preparar_eixo(ax, titulo):
-    ax.set_facecolor(COR_FUNDO)
-    ax.set_title(titulo, loc='left', fontsize=15, color=COR_TEXTO, pad=12, fontweight='bold')
-    for lado in ('top', 'right'):
-        ax.spines[lado].set_visible(False)
-    for lado in ('left', 'bottom'):
-        ax.spines[lado].set_color(COR_GRADE)
-    ax.tick_params(colors=COR_MUTED, labelsize=12)
-
-def _barras_horizontais(ax, somas, cor, com_percentual=False):
-    total = sum(somas.values()) or 1
-    valores = list(somas.values())
-    barras = ax.barh(list(somas.keys()), valores, color=cor, height=0.55)
-    if com_percentual:
-        rotulos = [f"{_fmt_reais(v)}  ({v / total:.0%})" for v in valores]
-    else:
-        rotulos = [_fmt_reais(v) for v in valores]
-    ax.bar_label(barras, labels=rotulos, padding=5, fontsize=11, color=COR_TEXTO)
-    ax.set_xlim(0, max(valores) * 1.5)  # folga para os rótulos
-    ax.xaxis.set_visible(False)
-    ax.spines['bottom'].set_visible(False)
-    ax.tick_params(axis='y', labelcolor=COR_TEXTO_2, labelsize=12)
-
-def _painel_hero(ax, total_entrada, total_saida, saldo, titulo):
-    ax.axis('off')
-    cor_saldo = COR_SALDO_POSITIVO if saldo >= 0 else STATUS_CRITICO
-    ax.text(0.5, 0.98, titulo, ha='center', va='top', fontsize=16, color=COR_TEXTO, fontweight='bold')
-    ax.text(0.5, 0.68, 'Saldo do mês', ha='center', va='top', fontsize=12, color=COR_MUTED)
-    ax.text(0.5, 0.52, _fmt_reais(saldo), ha='center', va='top', fontsize=34,
-            color=cor_saldo, fontweight='bold')
-    ax.text(0.5, 0.02, f"↑ Recebido {_fmt_reais(total_entrada)}      ↓ Gasto {_fmt_reais(total_saida)}",
-            ha='center', va='bottom', fontsize=13, color=COR_TEXTO_2)
-
-def _painel_metas(ax, metas, gasto_por_categoria):
-    nomes, fracoes, cores, pcts = [], [], [], []
-    for meta in metas:
-        gasto = gasto_por_categoria.get(meta.categoria, 0.0)
-        pct = (gasto / meta.valor_limite * 100) if meta.valor_limite else 0
-        nomes.append(f"{meta.categoria}\n{_fmt_reais(gasto)} / {_fmt_reais(meta.valor_limite)}")
-        fracoes.append(min(pct, 100) / 100)
-        cores.append(STATUS_CRITICO if pct >= 100 else STATUS_ALERTA if pct >= 80 else STATUS_BOM)
-        pcts.append(pct)
-
-    posicoes = list(range(len(metas)))
-    ax.barh(posicoes, [1] * len(metas), color=COR_TRILHO, height=0.45)
-    ax.barh(posicoes, fracoes, color=cores, height=0.45)
-    for pos, pct, cor in zip(posicoes, pcts, cores):
-        ax.text(1.04, pos, f"{pct:.0f}%", va='center', fontsize=13, color=cor, fontweight='bold')
-
-    ax.set_yticks(posicoes)
-    ax.set_yticklabels(nomes, fontsize=11)
-    ax.tick_params(axis='y', labelcolor=COR_TEXTO_2)
-    ax.invert_yaxis()
-    ax.set_xlim(0, 1.28)
-    ax.xaxis.set_visible(False)
-    for lado in ('bottom', 'left'):
-        ax.spines[lado].set_visible(False)
-
-def gerar_dashboard_completo(transacoes, metas=None, titulo='Dashboard Financeiro'):
-    if not transacoes:
-        return None
-
-    metas = metas or []
-    saidas = [t for t in transacoes if t.tipo == 'Saida']
-    entradas = [t for t in transacoes if t.tipo == 'Entrada']
-    total_saida = sum(t.valor for t in saidas)
-    total_entrada = sum(t.valor for t in entradas)
-    saldo = total_entrada - total_saida
-    gasto_por_categoria = _somar_por(saidas, 'categoria')
-
-    # Painéis empilhados na vertical: formato retrato lê melhor no celular
-    paineis = [(1.7, lambda ax: _painel_hero(ax, total_entrada, total_saida, saldo, titulo))]
-    if metas:
-        paineis.append((0.8 + 0.8 * len(metas), lambda ax: (
-            _preparar_eixo(ax, 'Metas do mês'),
-            _painel_metas(ax, metas, gasto_por_categoria))))
-    if saidas:
-        met_pagamento = _somar_por(saidas, 'metodo_pagamento')
-        paineis.append((0.8 + 0.6 * len(gasto_por_categoria), lambda ax: (
-            _preparar_eixo(ax, 'Gastos por categoria'),
-            _barras_horizontais(ax, gasto_por_categoria, COR_SAIDA))))
-        paineis.append((0.8 + 0.6 * len(met_pagamento), lambda ax: (
-            _preparar_eixo(ax, 'Gastos por método de pagamento'),
-            _barras_horizontais(ax, met_pagamento, COR_SAIDA, com_percentual=True))))
-    if entradas:
-        origem_entradas = _somar_por(entradas, 'categoria')
-        paineis.append((0.8 + 0.6 * len(origem_entradas), lambda ax: (
-            _preparar_eixo(ax, 'Entradas por origem'),
-            _barras_horizontais(ax, origem_entradas, COR_ENTRADA))))
-
-    alturas = [altura for altura, _ in paineis]
-    fig = plt.figure(figsize=(8.5, sum(alturas) + 0.55 * len(paineis)))
-    fig.patch.set_facecolor(COR_FUNDO)
-    grade = fig.add_gridspec(len(paineis), 1, height_ratios=alturas, hspace=0.55,
-                             left=0.22, right=0.94, top=0.97, bottom=0.03)
-    for indice, (_, desenhar) in enumerate(paineis):
-        desenhar(fig.add_subplot(grade[indice]))
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', facecolor=COR_FUNDO, dpi=110)
-    buf.seek(0)
-    plt.close()
-    return buf
-
 # ---------------------------------------------------------------------------
 # Comandos
 # ---------------------------------------------------------------------------
 
-TEXTO_START = (
-    "*Jarvis Seu Assistente Pessoal e Financeiro*\n\n"
-    "Coisas que pode me pedir:\n"
-    "👉 Envie / ou /menu para ver todos os comandos\n"
-    "👉 'Para definir metas para você mesmo digite: /meta [categoria] [valor]'\n"
-    "👉 'Para exportar uma planilha digite: Exportar planilha'\n"
-    "👉 'Para obter um resumo digite: Me dê um resumo'\n"
-    "👉 Para registrar uma transação digite: 'Recebi 5000 de salário' ou 'Gastei 50 no bar'\n"
-    "👉 Compra parcelada? Diga: 'Comprei uma TV em 10x de 200' — registro e aviso todo mês\n"
-    "👉 Veja seus parcelamentos com /parcelas\n"
-    "👉 Cartão de crédito? Diga o dia que a fatura fecha: /fatura [dia]\n"
-    "👉 Assinatura mensal? Diga: 'Assinei Netflix por 39,90' — renovo e registro todo mês\n"
-    "👉 Veja suas assinaturas e gastos fixos com /assinaturas\n"
-    "👉 Envie uma Foto de um comprovante \n"
-    "👉 Envie um Áudio falando seu gasto\n"
-    "👉 'Me lembra de pagar a internet amanhã às 9h'\n"
-    "👉 'Marca dentista amanhã das 15h às 16h' — confirmo antes de criar\n"
-    "👉 /agenda — compromissos de hoje (iCloud ou Google conectado)\n"
-    "👉 /lembretes — listar, concluir, adiar ou cancelar\n"
-    "👉 /resumodiario 08:00 — receber seu resumo diário\n"
-    "👉 /hoje — agenda, lembretes e finanças do dia"
-    "\n👉 /meuid — consultar seu identificador para conectar o calendário"
-)
+TEXTO_START = visual.mensagem("Jarvis · Seu assistente pessoal",
+    "Finanças, lembretes e agenda em uma conversa.",
+    visual.bloco("Registre sem formulários", "Gastei 50 no mercado.\nTambém aceito áudio e foto de comprovante."),
+    visual.bloco("Organize seu dia", "Me lembra de pagar a internet amanhã às 9h.\nO que tenho para fazer sexta?"),
+    visual.bloco("Comece por aqui", "/resumo · Finanças do mês\n/hoje · Agenda e pendências\n/menu · Todos os comandos"))
 
-TEXTO_AJUDA = (
-    "*Minhas Funcionalidades:*\n\n"
-    "Envie / ou /menu para ver todos os comandos. Envie /ca para filtrar opções.\n\n"
-    "1️⃣ *Registrar Transações:*\n"
-    "   📝 Texto: 'Gastei 50 no mercado'\n"
-    "   📸 Foto: Envie comprovante\n"
-    "   🎙️ Áudio: Fale seu gasto\n\n"
-    "2️⃣ *Compras Parceladas:*\n"
-    "   📆 'Comprei uma TV em 10x de 200' — registro cada parcela no mês em que ela cai\n"
-    "   💳 /fatura [dia] — informe o fechamento da fatura para acertar as datas\n"
-    "   Veja com /parcelas | Cancele com /cancelarparcela [número]\n\n"
-    "3️⃣ *Assinaturas (gastos fixos):*\n"
-    "   🔄 'Assinei Netflix por 39,90' — registro e renovo todo mês\n"
-    "   Veja com /assinaturas | Cancele com /cancelarassinatura [número]\n\n"
-    "4️⃣ *Gestão de Metas:*\n"
-    "   🎯 Use /meta [Categoria] [Valor]\n"
-    "   Ex: /meta Alimentacao 500\n\n"
-    "5️⃣ *Análises:*\n"
-    "   📊 Peça: 'Me dê um resumo' para ver gráficos e saldo\n\n"
-    "6️⃣ *Exportação:*\n"
-    "   📂 Peça: 'Exportar planilha' para receber o Excel\n\n"
-    "7️⃣ *Lembretes:*\n"
-    "   'Me lembra de pagar o aluguel todo dia 5 às 9h'\n"
-    "   /lembretes · /adiar ID MINUTOS · /concluir ID · /cancelarlembrete ID\n"
-    "   Concluir encerra também os lembretes recorrentes.\n\n"
-    "8️⃣ *Calendário (iCloud ou Google):*\n"
-    "   /calendarios · /agenda ou 'Qual minha agenda de amanhã?'\n"
-    "   'Marca dentista amanhã das 15h às 16h'\n"
-    "   /confirmar ID ou /descartar ID após conferir o pedido\n"
-    "   Aviso no WhatsApp: 30 min antes, ou a antecedência pedida ao criar.\n\n"
-    "9️⃣ *Resumo diário:*\n"
-    "   /hoje — consultar agora\n"
-    "   /resumodiario 08:00 — ativar · /resumodiario off — desligar\n"
-    "   /fuso America/Sao_Paulo — configurar fuso horário"
-)
+TEXTO_AJUDA = visual.mensagem("Como usar o Jarvis",
+    visual.bloco("Finanças", "Gastei 50 no mercado · Recebi 5000 de salário\n"
+                 "Comprei uma TV em 10x de 200 · Assinei Netflix por 39,90\n"
+                 "/resumo · /exportar · /assinaturas · /parcelas\n/meta Alimentacao 500 · /fatura 5"),
+    visual.bloco("Lembretes", "Me lembra de pagar o aluguel todo dia 5 às 9h\n"
+                 "/lembretes · /adiar ID MINUTOS\n/concluir ID · /cancelarlembrete ID\n"
+                 "Concluir encerra também as próximas ocorrências."),
+    visual.bloco("Agenda", "O que tenho para fazer sexta?\nMarca dentista amanhã das 15h às 16h\n"
+                 "/agenda · /calendarios · /confirmar ID · /descartar ID\n"
+                 "Conecte iCloud ou Google. Aviso padrão: 30 min antes."),
+    visual.bloco("Seu dia", "/hoje · Resumo agora\n/resumodiario 08:00 · Ativar envio diário\n"
+                 "/resumodiario off · Desativar\n/fuso America/Sao_Paulo · Ajustar horário"),
+    rodape="Todos os comandos: /menu · Seu identificador: /meuid")
 
 
 def comando_start(user_id, args):
@@ -600,54 +381,37 @@ def comando_start(user_id, args):
 def comando_definir_meta(user_id, args):
     try:
         if len(args) < 2:
-            whatsapp.enviar_texto(user_id, "Uso correto: /meta [Categoria] [Valor]")
+            whatsapp.enviar_texto(user_id, visual.mensagem("Definir uma meta", "Uso: /meta CATEGORIA VALOR", "Exemplo: /meta Alimentacao 500"))
             return
 
         categoria = args[0].capitalize()
         valor = float(args[1].replace(',', '.'))
 
         if definir_meta_db(categoria, valor, user_id):
-            whatsapp.enviar_texto(user_id, f"🎯 Meta de {categoria} definida para R$ {valor:.2f}!")
+            whatsapp.enviar_texto(user_id, visual.mensagem("✓ Meta definida", visual.bloco(visual.nome(categoria), f"Limite mensal: {_fmt_reais(valor)}"), rodape="Acompanhe em /resumo."))
         else:
-            whatsapp.enviar_texto(user_id, "Erro ao salvar meta.")
+            whatsapp.enviar_texto(user_id, visual.erro("A meta não foi salva. Tente novamente."))
 
     except ValueError:
-        whatsapp.enviar_texto(user_id, "O valor deve ser um número (ex: 500 ou 500.50).")
+        whatsapp.enviar_texto(user_id, visual.erro("Informe um valor numérico.", "Exemplo: /meta Alimentacao 500,50"))
 
 
 def comando_parcelas(user_id, args):
-    parcelamentos = listar_parcelamentos(user_id)
-
-    if not parcelamentos:
-        whatsapp.enviar_texto(
-            user_id,
-            "Nenhum parcelamento ativo.\nPara criar, diga algo como: 'Comprei uma TV em 10x de 200 no crédito'."
-        )
-        return
-
-    linhas = ["📆 *Parcelamentos ativos:*\n"]
-    for p in parcelamentos:
-        restam = p.parcelas_total - p.parcelas_pagas
-        linhas.append(
-            f"*#{p.id}* {p.descricao} — {p.parcelas_pagas}/{p.parcelas_total} pagas, "
-            f"restam {restam}x de R$ {p.valor_parcela:.2f} (próxima: {p.proxima_data.strftime('%d/%m/%Y')})"
-        )
-    linhas.append("\nPara cancelar um: /cancelarparcela [número]")
-    whatsapp.enviar_texto(user_id, "\n".join(linhas))
+    whatsapp.enviar_texto(user_id, visual.lista_parcelas(listar_parcelamentos(user_id)))
 
 
 def comando_cancelar_parcela(user_id, args):
     try:
         parc_id = int(args[0].lstrip('#'))
     except (IndexError, ValueError):
-        whatsapp.enviar_texto(user_id, "Uso correto: /cancelarparcela [número]. Veja os números com /parcelas.")
+        whatsapp.enviar_texto(user_id, visual.mensagem("Cancelar parcelamento", "Uso: /cancelarparcela ID", rodape="Encontre o ID em /parcelas."))
         return
 
     descricao = cancelar_parcelamento(parc_id, user_id)
     if descricao:
-        whatsapp.enviar_texto(user_id, f"🗑️ Parcelamento de '{descricao}' cancelado. As parcelas já registradas foram mantidas.")
+        whatsapp.enviar_texto(user_id, visual.mensagem("Parcelamento cancelado", visual.nome(descricao), "As parcelas já registradas foram mantidas."))
     else:
-        whatsapp.enviar_texto(user_id, "Parcelamento não encontrado. Veja os números com /parcelas.")
+        whatsapp.enviar_texto(user_id, visual.erro("Parcelamento não encontrado.", "Confira o ID em /parcelas."))
 
 
 def comando_fatura(user_id, args):
@@ -656,17 +420,16 @@ def comando_fatura(user_id, args):
     except (IndexError, ValueError):
         dia = 0
     if not 1 <= dia <= 31:
-        whatsapp.enviar_texto(user_id, "Uso correto: /fatura [dia do fechamento]. Ex: /fatura 5")
+        whatsapp.enviar_texto(user_id, visual.mensagem("Fechamento do cartão", "Uso: /fatura DIA", "Exemplo: /fatura 5 · Dias aceitos: 1 a 31."))
         return
 
     if definir_dia_fatura(dia, user_id):
         whatsapp.enviar_texto(
             user_id,
-            f"💳 Anotado: sua fatura fecha todo dia {dia}. "
-            f"Novas compras parceladas terão a 1ª parcela prevista para o próximo fechamento."
+            visual.mensagem("✓ Fechamento atualizado", f"Todo dia *{dia}*.", "Novos parcelamentos começam no próximo fechamento.")
         )
     else:
-        whatsapp.enviar_texto(user_id, "Erro ao salvar o dia da fatura.")
+        whatsapp.enviar_texto(user_id, visual.erro("O dia de fechamento não foi salvo. Tente novamente."))
 
 
 def comando_assinaturas(user_id, args):
@@ -677,14 +440,14 @@ def comando_cancelar_assinatura(user_id, args):
     try:
         ass_id = int(args[0].lstrip('#'))
     except (IndexError, ValueError):
-        whatsapp.enviar_texto(user_id, "Uso correto: /cancelarassinatura [número]. Veja os números com /assinaturas.")
+        whatsapp.enviar_texto(user_id, visual.mensagem("Cancelar assinatura", "Uso: /cancelarassinatura ID", rodape="Encontre o ID em /assinaturas."))
         return
 
     descricao = cancelar_assinatura(ass_id, user_id)
     if descricao:
-        whatsapp.enviar_texto(user_id, f"🗑️ Assinatura de '{descricao}' cancelada. As cobranças já registradas foram mantidas.")
+        whatsapp.enviar_texto(user_id, visual.mensagem("Assinatura cancelada", visual.nome(descricao), "As cobranças já registradas foram mantidas."))
     else:
-        whatsapp.enviar_texto(user_id, "Assinatura não encontrada. Veja os números com /assinaturas.")
+        whatsapp.enviar_texto(user_id, visual.erro("Assinatura não encontrada.", "Confira o ID em /assinaturas."))
 
 
 def comando_menu(user_id, args):
@@ -704,7 +467,7 @@ def comando_exportar(user_id, args):
 
 
 def comando_meuid(user_id, args):
-    whatsapp.enviar_texto(user_id, f"Seu identificador neste canal é: {user_id}")
+    whatsapp.enviar_texto(user_id, visual.mensagem("Seu identificador", str(user_id), rodape="Use este número em CALENDAR_USER_ID para conectar sua agenda."))
 
 
 COMANDOS = {
@@ -738,7 +501,7 @@ def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
                                          contexto_temporal=assistente_pessoal.contexto(user_id))
 
     if not resultado:
-        whatsapp.enviar_texto(user_id, "Não entendi. Tente ser mais claro.")
+        whatsapp.enviar_texto(user_id, visual.mensagem("Pode completar o pedido?", "Diga o que deseja registrar ou consultar.", rodape="Veja exemplos em /ajuda."))
         return
 
     if assistente_pessoal.executar_intencao(user_id, resultado):
@@ -749,7 +512,7 @@ def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
     if intencao == "erro_api":
         whatsapp.enviar_texto(
             user_id,
-            "Desculpe, o serviço de inteligência artificial está temporariamente indisponível. Tente novamente em alguns minutos."
+            visual.erro("O serviço de interpretação está indisponível agora.", "Tente novamente em alguns minutos. Comandos como /agenda e /hoje continuam disponíveis.")
         )
         return
 
@@ -762,7 +525,7 @@ def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
         if not dados.get('valor'):
             whatsapp.enviar_texto(
                 user_id,
-                "Não identifiquei o valor. Pode repetir com o número? Ex: 'Gastei 50 no mercado'."
+                visual.mensagem("Qual foi o valor?", "Reenvie o registro com o valor da compra.", "Exemplo: Gastei 50 no mercado.")
             )
             return
         dados['categoria'] = dados['categoria'].capitalize()
@@ -776,52 +539,34 @@ def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
         if parcelas > 1:
             resultado_parc = criar_parcelamento(dados, parcelas, user_id)
             if not resultado_parc:
-                whatsapp.enviar_texto(user_id, "Erro ao salvar no banco.")
+                whatsapp.enviar_texto(user_id, visual.erro("O parcelamento não foi salvo. Tente novamente."))
                 return
             primeira, tem_fatura = resultado_parc
-            dica_fatura = "" if tem_fatura else (
-                "\n\n💡 Me diga o dia que sua fatura fecha com /fatura [dia] e eu acerto as datas."
-            )
+            dica_fatura = "" if tem_fatura else "Configure o fechamento para acertar as datas: /fatura DIA."
             whatsapp.enviar_texto(
                 user_id,
-                f"📆 *Compra parcelada anotada!*\n\n"
-                f"📝 {dados['descricao']}\n"
-                f"💵 *{parcelas}x de {_fmt_reais(dados['valor'])}*\n"
-                f"📂 {dados['categoria']}  ·  💳 {dados['metodo_pagamento']}\n"
-                f"🗓️ 1ª parcela prevista para {primeira.strftime('%d/%m/%Y')} — nada entrou nos "
-                f"gastos deste mês; registro e aviso quando cada parcela cair. Veja com /parcelas"
-                f"{dica_fatura}"
+                visual.mensagem("✓ Parcelamento agendado",
+                    visual.bloco(f"{parcelas}× {_fmt_reais(dados['valor'])}", visual.nome(dados['descricao']),
+                                 f"{visual.nome(dados['categoria'])} · {visual.nome(dados['metodo_pagamento'])}"),
+                    f"Total: {_fmt_reais(parcelas * dados['valor'])}\nPrimeira parcela: {primeira:%d/%m/%Y}",
+                    "As parcelas entram nos gastos conforme forem registradas no fechamento.", dica_fatura,
+                    rodape="Acompanhar: /parcelas")
             )
             return
 
-        info_parcelas = ""
+        assinatura_criada = False
         if eh_assinatura:
             if criar_assinatura(dados, user_id):
-                info_parcelas = (
-                    "\n🔄 *Assinatura salva!* Registrei a cobrança deste mês e vou "
-                    "renovar e registrar automaticamente todo mês. Veja com /assinaturas"
-                )
+                assinatura_criada = True
 
         if salvar_transacao(dados, user_id):
             alerta = ""
             if dados['tipo'] == 'Saida':
                 alerta = progresso_meta(dados['categoria'], user_id)
 
-            if dados['tipo'] == 'Entrada':
-                cabecalho = "💰 *Entrada registrada!*"
-            else:
-                cabecalho = "🧾 *Gasto anotado!*"
-
-            msg = (
-                f"{cabecalho}\n\n"
-                f"📝 {dados['descricao']}\n"
-                f"💵 *{_fmt_reais(dados['valor'])}*\n"
-                f"📂 {dados['categoria']}  ·  💳 {dados['metodo_pagamento']}"
-                f"{info_parcelas}"
-                f"{alerta}"
-            )
+            msg = visual.transacao(dados, assinatura=assinatura_criada, alerta=alerta)
         else:
-            msg = "Erro ao salvar no banco."
+            msg = visual.erro("A transação não foi salva. Tente novamente.")
 
         whatsapp.enviar_texto(user_id, msg)
 
@@ -834,31 +579,31 @@ def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
             5: 'Maio', 6: 'Junho', 7: 'Julho', 8: 'Agosto',
             9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'
         }
-        hoje = datetime.now()
+        fuso = assistente_pessoal.fuso(user_id)
+        hoje = agora_utc().astimezone(validar_fuso(fuso))
         mes_nome = f"{meses_pt[hoje.month]}/{hoje.year}"
-
-        whatsapp.enviar_texto(user_id, f"📊 Gerando Dashboard de {mes_nome}...")
 
         transacoes = buscar_transacoes_mes_atual(user_id)
         if not transacoes:
-            whatsapp.enviar_texto(user_id, f"Nenhum dado encontrado neste mês ({mes_nome}).")
+            whatsapp.enviar_texto(user_id, visual.mensagem(f"Resumo · {mes_nome}", "Ainda não há transações neste mês.",
+                                                        rodape="Para começar: Gastei 50 no mercado."))
             return
 
-        imagem = gerar_dashboard_completo(transacoes, buscar_metas(user_id), mes_nome)
-        whatsapp.enviar_midia(user_id, imagem, 'image/png', 'dashboard.png', 'image')
+        whatsapp.enviar_texto(user_id, texto_resumo(transacoes, mes_nome))
+        imagem = gerar_dashboard_completo(transacoes, buscar_metas(user_id), mes_nome, fuso=fuso, agora=hoje)
+        whatsapp.enviar_midia(user_id, imagem, 'image/png', 'resumo_financeiro.png', 'image',
+                             "Seu mês em gráficos. Barras: participação de cada grupo. Linhas: entradas e saídas acumuladas por dia.")
 
     elif intencao == "exportacao":
-        whatsapp.enviar_texto(user_id, "📂 Gerando planilha...")
-
         arquivo_excel = gerar_arquivo_excel(user_id)
         if arquivo_excel:
             whatsapp.enviar_midia(
                 user_id, arquivo_excel,
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                'financas_pessoais.xlsx', 'document', "Seu extrato completo! 📊"
+                'financas_pessoais.xlsx', 'document', "Seu histórico completo de transações, pronto para filtrar e analisar no Excel."
             )
         else:
-            whatsapp.enviar_texto(user_id, "Erro ao exportar arquivo.")
+            whatsapp.enviar_texto(user_id, visual.erro("Não foi possível gerar a planilha.", "Tente /exportar novamente em alguns instantes."))
 
     elif intencao == "ajuda":
         whatsapp.enviar_texto(user_id, TEXTO_AJUDA)
@@ -925,7 +670,7 @@ def _atender(user_id, texto, key_midia, mime_type):
         # sem isso a exceção morre calada dentro da thread
         logging.exception("Erro ao atender %s", user_id)
         try:
-            whatsapp.enviar_texto(user_id, "Deu erro aqui do meu lado. Pode tentar de novo?")
+            whatsapp.enviar_texto(user_id, visual.erro("O pedido não foi concluído.", "Tente novamente em alguns instantes."))
         except Exception:
             logging.exception("Falha ao avisar o usuário %s do erro", user_id)
 

@@ -7,7 +7,7 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy.exc import IntegrityError
 
 from app import models
-from app.services import agenda, calendar_service
+from app.services import agenda, calendar_service, presentation as visual
 from app.services.personal_time import (
     agora_utc, formatar_data, fuso_padrao, ler_data, utc, validar_fuso, validar_horario,
 )
@@ -97,23 +97,24 @@ class AssistentePessoal:
                                        dia_original=data.astimezone(validar_fuso(fuso)).day)
             session.add(lembrete)
             session.flush()
-            return (f"🔔 Lembrete #{lembrete.id}: {lembrete.descricao}\n"
-                    f"{formatar_data(data, fuso)} ({fuso}) · repetição: {repeticao}.\n"
-                    "Veja /lembretes para concluir, adiar ou cancelar.")
+            return visual.mensagem(f"✓ Lembrete criado · #{lembrete.id}",
+                visual.bloco(lembrete.descricao, formatar_data(data, fuso), visual.REPETICOES[repeticao]),
+                rodape="Gerenciar: /lembretes")
 
     def listar_lembretes(self, user_id):
         with self.session_factory() as session:
             lembretes = session.query(models.Lembrete).filter_by(user_id=user_id, ativo=True).order_by(
                 models.Lembrete.proxima_data, models.Lembrete.id).all()
-            linhas = ["🔔 *Seus lembretes:*"]
+            itens = []
             for lembrete in lembretes:
                 data = formatar_data(lembrete.proxima_data, lembrete.fuso) if lembrete.proxima_data else "aguardando conclusão"
-                linhas.append(f"#{lembrete.id} · {lembrete.descricao} · {data} · {lembrete.repeticao}")
+                itens.append(visual.bloco(f"{visual.nome(lembrete.descricao)} · #{lembrete.id}",
+                                         data, visual.REPETICOES[lembrete.repeticao]))
             if not lembretes:
-                linhas.append("Nenhum ativo. Exemplo: 'Me lembra de pagar a internet amanhã às 9h'.")
-            linhas.append("/concluir ID · /adiar ID MINUTOS · /cancelarlembrete ID\n"
-                          "Concluir encerra o lembrete, inclusive se for recorrente.")
-            return "\n".join(linhas)
+                return visual.mensagem("Lembretes", "Nenhum lembrete ativo.",
+                                       rodape="Para adicionar: Me lembra de pagar a internet amanhã às 9h.")
+            return visual.mensagem("Lembretes", *itens,
+                rodape="/adiar ID MINUTOS · /concluir ID · /cancelarlembrete ID\nConcluir encerra também a recorrência.")
 
     def alterar_lembrete(self, user_id, identificador, acao, minutos=None, agora=None):
         agora = agora or agora_utc()
@@ -131,9 +132,11 @@ class AssistentePessoal:
             if acao == "adiar":
                 lembrete.proxima_data = agora + timedelta(minutes=minutos)
                 lembrete.dia_original = lembrete.proxima_data.astimezone(validar_fuso(lembrete.fuso)).day
-                return f"🔔 Lembrete #{identificador} adiado para {formatar_data(lembrete.proxima_data, lembrete.fuso)}."
+                return visual.mensagem(f"Lembrete adiado · #{identificador}", visual.nome(lembrete.descricao),
+                                       f"Novo horário: {formatar_data(lembrete.proxima_data, lembrete.fuso)}")
             lembrete.ativo = False
-            return f"✅ Lembrete #{identificador} {'concluído' if acao == 'concluir' else 'cancelado'}."
+            return visual.mensagem(f"✓ Lembrete {'concluído' if acao == 'concluir' else 'cancelado'} · #{identificador}",
+                                   visual.nome(lembrete.descricao))
 
     def configurar_resumo(self, user_id, horario):
         if horario is not None:
@@ -146,7 +149,10 @@ class AssistentePessoal:
             preferencias.horario_resumo = horario
             session.query(models.EntregaPessoal).filter_by(user_id=user_id, tipo="resumo", estado="pendente").update(
                 {"estado": "cancelado"})
-        return f"☀️ Resumo diário ativado às {horario} ({self.fuso(user_id)})." if horario else "Resumo diário desativado."
+        if horario:
+            return visual.mensagem("✓ Resumo diário ativado", f"Todos os dias às *{horario}*.",
+                                   f"Fuso: {self.fuso(user_id)}", rodape="Consultar agora: /hoje · Desativar: /resumodiario off")
+        return visual.mensagem("Resumo diário desativado", "Você ainda pode consultar seu dia com /hoje.")
 
     def configurar_fuso(self, user_id, nome):
         validar_fuso(nome)
@@ -156,7 +162,8 @@ class AssistentePessoal:
                 preferencias = models.PreferenciasPessoais(user_id=user_id)
                 session.add(preferencias)
             preferencias.fuso = nome
-        return f"Fuso definido: {nome}. Novos agendamentos e o resumo usarão esse fuso; lembretes existentes mantêm o seu."
+        return visual.mensagem("✓ Fuso atualizado", nome,
+                               "Vale para novos agendamentos e o resumo diário. Lembretes existentes mantêm o fuso original.")
 
     def agenda(self, user_id, dados=None):
         dados = dados or {}
@@ -194,11 +201,14 @@ class AssistentePessoal:
                                            calendario=calendar_service.identidade_calendario())
             session.add(evento)
             session.flush()
-            mensagem = (f"📅 Criar '{titulo.strip()}'?\n{formatar_data(inicio, fuso)} até {formatar_data(fim, fuso)}"
-                        f" ({fuso}). Aviso {minutos} min antes.\n")
-            if conflitos:
-                mensagem += "⚠️ Conflitos: " + "; ".join(evento.titulo for evento in conflitos) + ".\n"
-            return mensagem + f"/confirmar {evento.id} para criar. /descartar {evento.id} para desistir. Expira em 15 min."
+            inicio_local = inicio.astimezone(validar_fuso(fuso))
+            fim_local = fim.astimezone(validar_fuso(fuso))
+            horario_final = fim_local.strftime("%H:%M") if inicio_local.date() == fim_local.date() else formatar_data(fim, fuso)
+            conflito = visual.bloco("Conflitos de horário", "\n".join(f"• {visual.nome(item.titulo)}" for item in conflitos)) if conflitos else None
+            return visual.mensagem("Confirmar compromisso",
+                visual.bloco(visual.nome(titulo), f"{formatar_data(inicio, fuso)} até {horario_final}",
+                             f"Aviso: {minutos} min antes · Fuso: {fuso}"), conflito,
+                rodape=f"Criar: /confirmar {evento.id}\nDescartar: /descartar {evento.id}\nO pedido expira em 15 minutos.")
 
     def confirmar_evento(self, user_id, identificador, descartar=False, agora=None):
         agora = agora or agora_utc()
@@ -207,17 +217,18 @@ class AssistentePessoal:
             if not evento:
                 raise ValueError("Pedido não encontrado para este usuário.")
             if evento.estado == "criado":
-                return "Esse evento já foi criado no calendário."
+                return visual.mensagem("Compromisso já criado", visual.nome(evento.titulo), rodape="Confira em /agenda.")
             if evento.estado != "pendente" or utc(evento.expira_em) <= agora or utc(evento.inicio) <= agora:
                 raise ValueError("Pedido expirado ou descartado. Envie o compromisso novamente.")
             if descartar:
                 evento.estado = "descartado"
-                return "Pedido descartado."
+                return visual.mensagem("Pedido descartado", "O compromisso não foi criado.")
             if evento.calendario != calendar_service.identidade_calendario():
                 raise ValueError("O calendário configurado mudou. Envie o compromisso novamente.")
             self.calendario_factory(user_id).criar(evento.uid, evento.titulo, utc(evento.inicio), utc(evento.fim), evento.aviso_minutos)
             evento.estado = "criado"
-            return f"✅ '{evento.titulo}' criado no calendário para {formatar_data(evento.inicio, self.fuso(user_id))}."
+            return visual.mensagem("✓ Compromisso criado", visual.bloco(visual.nome(evento.titulo),
+                                   formatar_data(evento.inicio, self.fuso(user_id))), rodape="Consultar: /agenda")
 
     def resumo(self, user_id, agora=None):
         agora = agora or agora_utc()
@@ -227,26 +238,30 @@ class AssistentePessoal:
         inicio = local.replace(hour=0, minute=0, second=0, microsecond=0)
         fim = inicio + timedelta(days=1)
         inicio_mes = inicio.replace(day=1)
-        linhas = [f"☀️ *Seu dia · {local.strftime('%d/%m/%Y')}*"]
+        secoes = []
         relevante = False
         if calendar_service.dono_calendario() == user_id and calendar_service.provedor_nome():
             try:
                 eventos = self.calendario_factory(user_id).listar(utc(inicio), utc(fim), fuso)
-                linhas.extend(self._linhas_eventos(eventos, fuso))
+                secoes.append(visual.bloco("Agenda", "\n".join(self._linhas_eventos(eventos, fuso))))
                 relevante = bool(eventos)
             except Exception as erro:
                 logger.warning("Agenda indisponível no resumo: %s", type(erro).__name__)
-                linhas.append("📅 Agenda indisponível agora. Consulte /agenda mais tarde.")
+                secoes.append(visual.bloco("Agenda", "Indisponível agora. Tente /agenda mais tarde."))
                 relevante = True
         with self.session_factory() as session:
             lembretes = session.query(models.Lembrete).filter(
                 models.Lembrete.user_id == user_id, models.Lembrete.ativo.is_(True),
                 (models.Lembrete.proxima_data < utc(fim)) | models.Lembrete.proxima_data.is_(None),
             ).all()
+            pendencias = []
             for lembrete in lembretes:
                 quando = formatar_data(lembrete.proxima_data, lembrete.fuso) if lembrete.proxima_data else "aguardando conclusão"
-                linhas.append(f"🔔 #{lembrete.id} {lembrete.descricao} · {quando}")
+                pendencias.append(f"• {visual.nome(lembrete.descricao)} · #{lembrete.id}\n  {quando}")
+            if pendencias:
+                secoes.append(visual.bloco("Lembretes", "\n".join(pendencias)))
             relevante = relevante or bool(lembretes)
+            cobrancas = []
             for modelo, rotulo in ((models.Assinatura, "Renovação"), (models.Parcelamento, "Parcela prevista")):
                 registros = session.query(modelo).filter(
                     modelo.user_id == user_id, modelo.proxima_data >= utc(inicio),
@@ -254,9 +269,11 @@ class AssistentePessoal:
                 ).all()
                 for registro in registros:
                     valor = registro.valor if modelo is models.Assinatura else registro.valor_parcela
-                    linhas.append(f"💳 {rotulo}: {registro.descricao} · R$ {valor:.2f} · "
-                                  f"{formatar_data(registro.proxima_data, fuso)}")
+                    data = utc(registro.proxima_data).astimezone(zona).strftime("%d/%m")
+                    cobrancas.append(f"• {visual.nome(registro.descricao)} · {visual.moeda(valor)}\n  {rotulo} em {data}")
                 relevante = relevante or bool(registros)
+            if cobrancas:
+                secoes.append(visual.bloco("Cobranças · Hoje e amanhã", "\n".join(cobrancas)))
             transacoes = session.query(models.Transacao).filter(
                 models.Transacao.user_id == user_id, models.Transacao.data >= utc(inicio_mes),
                 models.Transacao.data < utc(inicio_mes + relativedelta(months=1)),
@@ -264,17 +281,21 @@ class AssistentePessoal:
             entradas = sum(item.valor for item in transacoes if item.tipo == "Entrada")
             saidas = sum(item.valor for item in transacoes if item.tipo == "Saida")
             if transacoes:
-                linhas.append(f"💰 Registros do mês: entradas R$ {entradas:.2f} · saídas R$ {saidas:.2f} · "
-                              f"diferença R$ {entradas - saidas:.2f}.")
+                secoes.append(visual.bloco("Finanças do mês", f"Entradas: {visual.moeda(entradas)}\n"
+                    f"Saídas: {visual.moeda(saidas)}\nResultado dos registros: {visual.moeda(entradas - saidas)}"))
                 relevante = True
+            metas = []
             for meta in session.query(models.Meta).filter_by(user_id=user_id).all():
                 gasto = sum(item.valor for item in transacoes if item.tipo == "Saida" and item.categoria == meta.categoria)
                 restante = meta.valor_limite - gasto
-                linhas.append(f"🎯 {meta.categoria}: " + (f"restam R$ {restante:.2f}." if restante >= 0 else f"limite excedido em R$ {-restante:.2f}."))
+                situacao = f"restam {visual.moeda(restante)}" if restante >= 0 else f"limite excedido em {visual.moeda(-restante)}"
+                metas.append(f"• {visual.nome(meta.categoria)} · {situacao}")
                 relevante = True
+            if metas:
+                secoes.append(visual.bloco("Metas", "\n".join(metas)))
         if not relevante:
-            linhas.append("Nenhum lembrete, compromisso ou registro financeiro para mostrar.")
-        return "\n".join(linhas), relevante
+            secoes = ["Nenhum lembrete, compromisso ou registro financeiro para mostrar."]
+        return visual.mensagem(f"Seu dia · {local.strftime('%d/%m/%Y')}", *secoes), relevante
 
     def executar_intencao(self, user_id, resultado):
         intencao = resultado.get("intencao")
@@ -305,10 +326,10 @@ class AssistentePessoal:
             else:
                 mensagem = resultado.get("resposta") or "Informe o dia e o horário do pedido."
         except ValueError as erro:
-            mensagem = str(erro)
+            mensagem = visual.mensagem("Confira o pedido", str(erro))
         except Exception as erro:
             logger.warning("Falha no assistente pessoal: %s", type(erro).__name__)
-            mensagem = "Não consegui acessar o serviço agora. Verifique a configuração do calendário ou tente novamente."
+            mensagem = visual.erro("O serviço está indisponível agora.", "Confira a configuração do calendário ou tente novamente em instantes.")
         self.enviar_texto(user_id, mensagem)
         return True
 
@@ -355,10 +376,10 @@ class AssistentePessoal:
                     raise ValueError("Use /fuso America/Sao_Paulo.")
                 mensagem = self.configurar_fuso(user_id, args[0])
         except ValueError as erro:
-            mensagem = str(erro)
+            mensagem = visual.mensagem("Confira o pedido", str(erro))
         except Exception as erro:
             logger.warning("Falha no comando pessoal: %s", type(erro).__name__)
-            mensagem = "Não consegui acessar o calendário. Verifique as credenciais e tente novamente."
+            mensagem = visual.erro("Não foi possível acessar o calendário.", "Confira as credenciais no servidor e tente novamente.")
         self.enviar_texto(user_id, mensagem)
         return True
 
@@ -370,10 +391,10 @@ class AssistentePessoal:
             for lembrete in lembretes:
                 data = utc(lembrete.proxima_data)
                 enfileirar(session, f"lembrete:{lembrete.id}:{data.isoformat()}", lembrete.user_id,
-                           f"🔔 *Lembrete #{lembrete.id}:* {lembrete.descricao}\n"
-                           f"Agendado para {formatar_data(data, lembrete.fuso)}.\n"
-                           f"/adiar {lembrete.id} 10 · /concluir {lembrete.id}" +
-                           (" (encerra a recorrência)" if lembrete.repeticao != "nenhuma" else ""),
+                           visual.mensagem(f"🔔 Lembrete · #{lembrete.id}",
+                               visual.bloco(visual.nome(lembrete.descricao), formatar_data(data, lembrete.fuso)),
+                               rodape=f"Adiar 10 min: /adiar {lembrete.id} 10\nConcluir: /concluir {lembrete.id}" +
+                               (" (encerra a recorrência)" if lembrete.repeticao != "nenhuma" else "")),
                            agora, lembrete_id=lembrete.id)
                 lembrete.proxima_data = proxima_ocorrencia(data, lembrete.repeticao, lembrete.fuso, lembrete.dia_original, agora)
 
@@ -423,7 +444,8 @@ class AssistentePessoal:
                     chave = "agenda:" + chave
                     chaves_atuais.add(chave)
                     enfileirar(session, chave, user_id,
-                               f"📅 {evento.titulo} · {formatar_data(evento.inicio, fuso)}.", agora,
+                               visual.mensagem("Compromisso em breve", visual.bloco(visual.nome(evento.titulo),
+                                                formatar_data(evento.inicio, fuso))), agora,
                                tipo="agenda", expira_em=utc(evento.fim) if minutos == 0 else utc(evento.inicio))
             pendentes = session.query(models.EntregaPessoal).filter_by(user_id=user_id, tipo="agenda", estado="pendente").all()
             for entrega in pendentes:
