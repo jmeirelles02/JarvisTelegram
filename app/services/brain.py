@@ -9,13 +9,10 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-GROQ_URL = "https://api.groq.com/openai/v1"
-MODELO_TEXTO = "llama-3.3-70b-versatile"
-MODELO_VISAO = "meta-llama/llama-4-scout-17b-16e-instruct"
-MODELO_AUDIO = "whisper-large-v3"
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
 # Prompt compacto: mesma extração, ~60% menos tokens que a versão original
-PROMPT_TEXTO = """Responda APENAS com JSON. Classifique a entrada (texto ou imagem de comprovante):
+PROMPT_TEXTO = """Responda APENAS com JSON. Classifique a entrada (texto, áudio ou imagem de comprovante):
 
 1. Transação: {"intencao":"transacao","dados":{"descricao":"resumo do item","valor":0.00,"categoria":"Alimentacao|Transporte|Lazer|Casa|Contas|Servicos|Outros","metodo_pagamento":"Credito|Debito|Pix|Dinheiro","tipo":"Saida|Entrada","parcelas":1,"assinatura":false}}
 - Fatura ou boleto (cartão de crédito, luz, água, internet, telefone): categoria "Contas".
@@ -50,53 +47,46 @@ def _atalho_local(texto):
                 return {"intencao": intencao}
     return None
 
-def _transcrever_audio(api_key, arquivo_bytes, mime_type):
-    response = requests.post(
-        f"{GROQ_URL}/audio/transcriptions",
-        headers={"Authorization": f"Bearer {api_key}"},
-        files={"file": ("audio.ogg", arquivo_bytes, mime_type)},
-        data={"model": MODELO_AUDIO, "language": "pt"},
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json()["text"]
-
 def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=None, contexto=None):
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        return None
-
     try:
-        # Áudio não entra direto no chat: transcreve com Whisper e vira texto
-        if arquivo_bytes and mime_type and mime_type.startswith("audio"):
-            transcricao = _transcrever_audio(api_key, arquivo_bytes, mime_type)
-            logger.info("🎙️ Áudio transcrito: %s", transcricao)
-            mensagem_usuario = transcricao
-            arquivo_bytes = None
-
         if mensagem_usuario and not arquivo_bytes:
             atalho = _atalho_local(mensagem_usuario)
             if atalho:
                 logger.info("⚡ Atalho local (0 tokens): %s", atalho["intencao"])
                 return atalho
 
+        api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        modelo = os.getenv("OPENROUTER_MODEL", "").strip()
+        if not api_key or not modelo:
+            logger.error("Configure OPENROUTER_API_KEY e OPENROUTER_MODEL no ambiente.")
+            return {"intencao": "erro_api"}
+
         conteudo = []
         if arquivo_bytes and mime_type:
             b64 = base64.b64encode(arquivo_bytes).decode()
-            conteudo.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime_type};base64,{b64}"},
-            })
+            media_type = mime_type.split(";", 1)[0].strip().lower()
+            if media_type.startswith("audio/"):
+                formato = media_type.split("/", 1)[1]
+                formato = {"mpeg": "mp3", "mp4": "m4a", "x-wav": "wav"}.get(formato, formato)
+                conteudo.append({
+                    "type": "input_audio",
+                    "input_audio": {"data": b64, "format": formato},
+                })
+            else:
+                conteudo.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{b64}"},
+                })
         texto_prompt = f"{mensagem_usuario or ''}\n{PROMPT_TEXTO}"
         if contexto:
             texto_prompt += f"\nContexto financeiro do usuário (mês atual): {contexto}"
         conteudo.append({"type": "text", "text": texto_prompt})
 
         response = requests.post(
-            f"{GROQ_URL}/chat/completions",
+            f"{OPENROUTER_URL}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
             json={
-                "model": MODELO_VISAO if arquivo_bytes else MODELO_TEXTO,
+                "model": modelo,
                 "messages": [{"role": "user", "content": conteudo}],
                 "response_format": {"type": "json_object"},
                 "temperature": 0,
@@ -123,7 +113,7 @@ def interpretar_mensagem(mensagem_usuario=None, arquivo_bytes=None, mime_type=No
         return {"intencao": "erro_api"}
 
 if __name__ == "__main__":
-    # Smoke test: python -m app.services.brain (precisa de GROQ_API_KEY válida)
+    # Smoke test: python -m app.services.brain (precisa de OPENROUTER_API_KEY e OPENROUTER_MODEL)
     logging.basicConfig(level=logging.INFO)
 
     atalho = interpretar_mensagem("me dê um resumo")

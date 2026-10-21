@@ -15,9 +15,9 @@ O projeto segue uma arquitetura baseada em eventos, onde o bot atua como interfa
 1. **Entrada:** O usuário envia uma mensagem via Telegram. Pode ser texto ("Gastei 50 reais no almoço"), uma foto de um comprovante fiscal ou um áudio descrevendo um gasto.
 2. **Processamento (Backend Python):** O script principal recebe o objeto `Update` da API do Telegram.
 3. **Interpretação (AI Layer):**
-* Se for **Texto**, é enviado diretamente ao modelo de linguagem (Llama 4 Scout via Groq).
+* Se for **Texto**, é enviado diretamente ao modelo de linguagem (modelo configurado em `OPENROUTER_MODEL` via OpenRouter).
 * Se for **Imagem**, o arquivo é baixado temporariamente em memória (bytes) e enviado ao modelo com visão.
-* Se for **Áudio**, ele é transcrito pelo Whisper (via Groq) e o texto resultante segue o fluxo normal.
+* Se for **Áudio**, os bytes são enviados em base64 como `input_audio` ao OpenRouter.
 * O modelo analisa o conteúdo e retorna um JSON estruturado contendo: `valor`, `categoria`, `descrição`, `método de pagamento` e `tipo` (Entrada/Saída).
 
 
@@ -30,7 +30,7 @@ As tecnologias foram escolhidas visando baixo custo de operação, facilidade de
 
 * **Linguagem:** Python
 * **Interface:** Telegram Bot API
-* **Inteligência Artificial:** Llama 4 Scout + Whisper (via Groq)
+* **Inteligência Artificial:** OpenRouter (modelo configurável por variável de ambiente)
 * **Banco de Dados:** NeonDB
 * **ORM:** SQLAlchemy
 * **Análise de Dados:** Pandas e Matplotlib
@@ -76,6 +76,16 @@ O projeto utiliza um ambiente virtual para gerenciamento de dependências.
 
 1. Clonar o repositório.
 2. Criar o arquivo .env na raiz do projeto.
-3. Configurar as variáveis de ambiente no arquivo `.env` (`TELEGRAM_TOKEN`, `GROQ_API_KEY` e `DATABASE_URL`).
+3. Configurar as variáveis de ambiente no arquivo `.env` (`TELEGRAM_TOKEN`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` e `DATABASE_URL`).
 4. Instalar dependências: `pip install -r requirements.txt`.
 5. Executar o bot: `python run_bot.py` (as tabelas do banco são criadas automaticamente).
+
+### OpenRouter no Render
+
+Em **Environment** do serviço, configure `OPENROUTER_API_KEY` com sua chave e `OPENROUTER_MODEL` com o identificador completo do modelo (`provedor/modelo`). Salve as variáveis e faça o redeploy. A variável `GROQ_API_KEY` não é mais utilizada.
+
+O mesmo modelo atende texto, imagens e áudio: escolha um que suporte as modalidades utilizadas, áudio OGG/Opus para mensagens de voz e respostas JSON. Consulte os formatos aceitos pelo modelo na [documentação de áudio do OpenRouter](https://openrouter.ai/docs/guides/overview/multimodal/audio).
+
+### Testes
+
+`python -m unittest test_brain.py` valida a integração OpenRouter sem rede, chave ou banco de dados.
