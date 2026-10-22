@@ -11,6 +11,9 @@ from flask import Flask, request
 from app.services import brain, telegram, transport as whatsapp, presentation as visual
 from app import models, database
 from app.services.personal import AssistentePessoal
+from app.services.conversation import Conversa
+from app.services.assistant import AssistenteContextual
+from app.services.proactivity import IniciativaPessoal
 from app.services.command_menu import menu_comandos
 from app.services.reports import gerar_dashboard as gerar_dashboard_completo, texto_resumo, somar_por as _somar_por
 from app.services.presentation import moeda as _fmt_reais
@@ -25,7 +28,18 @@ load_dotenv()
 
 models.Base.metadata.create_all(bind=database.engine)
 
-assistente_pessoal = AssistentePessoal(database.SessionLocal, whatsapp.enviar_texto)
+conversa = Conversa(lambda: database.SessionLocal())
+
+
+def enviar_texto(user_id, texto):
+    resultado = whatsapp.enviar_texto(user_id, texto)
+    conversa.registrar(user_id, "assistant", texto)
+    return resultado
+
+
+assistente_pessoal = AssistentePessoal(database.SessionLocal, enviar_texto)
+contexto_pessoal = AssistenteContextual(lambda: database.SessionLocal(), enviar_texto)
+iniciativa = IniciativaPessoal(lambda: database.SessionLocal(), contexto_pessoal, conversa, enviar_texto)
 
 def salvar_transacao(dados_ia, user_id):
     session = database.SessionLocal()
@@ -235,7 +249,7 @@ def vigiar_recorrencias():
         avisos = processar_parcelas_devidas() + processar_assinaturas_devidas()
         for user_id, msg in avisos:
             try:
-                whatsapp.enviar_texto(user_id, msg)
+                enviar_texto(user_id, msg)
             except Exception as e:
                 print(f"Erro ao enviar aviso de recorrência: {e}")
         time.sleep(6 * 3600)
@@ -355,11 +369,14 @@ def gerar_arquivo_excel(user_id):
 
 TEXTO_START = visual.mensagem("Jarvis · Seu assistente pessoal",
     "Finanças, lembretes e agenda em uma conversa.",
+    "Conte sobre sua rotina e seus objetivos. Vou usar esse contexto para ajudar e avisar quando perceber algo relevante.",
     visual.bloco("Registre sem formulários", "Gastei 50 no mercado.\nTambém aceito áudio e foto de comprovante."),
     visual.bloco("Organize seu dia", "Me lembra de pagar a internet amanhã às 9h.\nO que tenho para fazer sexta?"),
-    visual.bloco("Comece por aqui", "/resumo · Finanças do mês\n/hoje · Agenda e pendências\n/menu · Todos os comandos"))
+    visual.bloco("Sugestões espontâneas", "Até duas por dia, entre 08h e 21h no seu fuso. Você pode ajustar conversando comigo ou desligar em /proatividade off."),
+    visual.bloco("Comece por aqui", "/resumo · Finanças do mês\n/hoje · Agenda e pendências\n/memorias · O que lembro sobre você\n/menu · Todos os comandos"))
 
 TEXTO_AJUDA = visual.mensagem("Como usar o Jarvis",
+    visual.bloco("Converse do seu jeito", "Conte sua rotina, preferências e objetivos. Posso relacionar isso à sua agenda e aos seus registros para ajudar a planejar o próximo passo."),
     visual.bloco("Finanças", "Gastei 50 no mercado · Recebi 5000 de salário\n"
                  "Comprei uma TV em 10x de 200 · Assinei Netflix por 39,90\n"
                  "/resumo · /exportar · /assinaturas · /parcelas\n/meta Alimentacao 500 · /fatura 5"),
@@ -371,47 +388,50 @@ TEXTO_AJUDA = visual.mensagem("Como usar o Jarvis",
                  "Conecte iCloud ou Google. Aviso padrão: 30 min antes."),
     visual.bloco("Seu dia", "/hoje · Resumo agora\n/resumodiario 08:00 · Ativar envio diário\n"
                  "/resumodiario off · Desativar\n/fuso America/Sao_Paulo · Ajustar horário"),
+    visual.bloco("Memória e iniciativa", "/memorias · Ver o que lembro\n/esquecer ID · Apagar uma informação\n"
+                 "/proatividade on ou off · Ligar ou desligar sugestões\n"
+                 "Para ajustar: Só me mande sugestões entre 10h e 19h, uma por dia."),
     rodape="Todos os comandos: /menu · Seu identificador: /meuid")
 
 
 def comando_start(user_id, args):
-    whatsapp.enviar_texto(user_id, TEXTO_START)
+    enviar_texto(user_id, TEXTO_START)
 
 
 def comando_definir_meta(user_id, args):
     try:
         if len(args) < 2:
-            whatsapp.enviar_texto(user_id, visual.mensagem("Definir uma meta", "Uso: /meta CATEGORIA VALOR", "Exemplo: /meta Alimentacao 500"))
+            enviar_texto(user_id, visual.mensagem("Definir uma meta", "Uso: /meta CATEGORIA VALOR", "Exemplo: /meta Alimentacao 500"))
             return
 
         categoria = args[0].capitalize()
         valor = float(args[1].replace(',', '.'))
 
         if definir_meta_db(categoria, valor, user_id):
-            whatsapp.enviar_texto(user_id, visual.mensagem("✓ Meta definida", visual.bloco(visual.nome(categoria), f"Limite mensal: {_fmt_reais(valor)}"), rodape="Acompanhe em /resumo."))
+            enviar_texto(user_id, visual.mensagem("✓ Meta definida", visual.bloco(visual.nome(categoria), f"Limite mensal: {_fmt_reais(valor)}"), rodape="Acompanhe em /resumo."))
         else:
-            whatsapp.enviar_texto(user_id, visual.erro("A meta não foi salva. Tente novamente."))
+            enviar_texto(user_id, visual.erro("A meta não foi salva. Tente novamente."))
 
     except ValueError:
-        whatsapp.enviar_texto(user_id, visual.erro("Informe um valor numérico.", "Exemplo: /meta Alimentacao 500,50"))
+        enviar_texto(user_id, visual.erro("Informe um valor numérico.", "Exemplo: /meta Alimentacao 500,50"))
 
 
 def comando_parcelas(user_id, args):
-    whatsapp.enviar_texto(user_id, visual.lista_parcelas(listar_parcelamentos(user_id)))
+    enviar_texto(user_id, visual.lista_parcelas(listar_parcelamentos(user_id)))
 
 
 def comando_cancelar_parcela(user_id, args):
     try:
         parc_id = int(args[0].lstrip('#'))
     except (IndexError, ValueError):
-        whatsapp.enviar_texto(user_id, visual.mensagem("Cancelar parcelamento", "Uso: /cancelarparcela ID", rodape="Encontre o ID em /parcelas."))
+        enviar_texto(user_id, visual.mensagem("Cancelar parcelamento", "Uso: /cancelarparcela ID", rodape="Encontre o ID em /parcelas."))
         return
 
     descricao = cancelar_parcelamento(parc_id, user_id)
     if descricao:
-        whatsapp.enviar_texto(user_id, visual.mensagem("Parcelamento cancelado", visual.nome(descricao), "As parcelas já registradas foram mantidas."))
+        enviar_texto(user_id, visual.mensagem("Parcelamento cancelado", visual.nome(descricao), "As parcelas já registradas foram mantidas."))
     else:
-        whatsapp.enviar_texto(user_id, visual.erro("Parcelamento não encontrado.", "Confira o ID em /parcelas."))
+        enviar_texto(user_id, visual.erro("Parcelamento não encontrado.", "Confira o ID em /parcelas."))
 
 
 def comando_fatura(user_id, args):
@@ -420,54 +440,58 @@ def comando_fatura(user_id, args):
     except (IndexError, ValueError):
         dia = 0
     if not 1 <= dia <= 31:
-        whatsapp.enviar_texto(user_id, visual.mensagem("Fechamento do cartão", "Uso: /fatura DIA", "Exemplo: /fatura 5 · Dias aceitos: 1 a 31."))
+        enviar_texto(user_id, visual.mensagem("Fechamento do cartão", "Uso: /fatura DIA", "Exemplo: /fatura 5 · Dias aceitos: 1 a 31."))
         return
 
     if definir_dia_fatura(dia, user_id):
-        whatsapp.enviar_texto(
+        enviar_texto(
             user_id,
             visual.mensagem("✓ Fechamento atualizado", f"Todo dia *{dia}*.", "Novos parcelamentos começam no próximo fechamento.")
         )
     else:
-        whatsapp.enviar_texto(user_id, visual.erro("O dia de fechamento não foi salvo. Tente novamente."))
+        enviar_texto(user_id, visual.erro("O dia de fechamento não foi salvo. Tente novamente."))
 
 
 def comando_assinaturas(user_id, args):
-    whatsapp.enviar_texto(user_id, _texto_assinaturas(user_id))
+    enviar_texto(user_id, _texto_assinaturas(user_id))
 
 
 def comando_cancelar_assinatura(user_id, args):
     try:
         ass_id = int(args[0].lstrip('#'))
     except (IndexError, ValueError):
-        whatsapp.enviar_texto(user_id, visual.mensagem("Cancelar assinatura", "Uso: /cancelarassinatura ID", rodape="Encontre o ID em /assinaturas."))
+        enviar_texto(user_id, visual.mensagem("Cancelar assinatura", "Uso: /cancelarassinatura ID", rodape="Encontre o ID em /assinaturas."))
         return
 
     descricao = cancelar_assinatura(ass_id, user_id)
     if descricao:
-        whatsapp.enviar_texto(user_id, visual.mensagem("Assinatura cancelada", visual.nome(descricao), "As cobranças já registradas foram mantidas."))
+        enviar_texto(user_id, visual.mensagem("Assinatura cancelada", visual.nome(descricao), "As cobranças já registradas foram mantidas."))
     else:
-        whatsapp.enviar_texto(user_id, visual.erro("Assinatura não encontrada.", "Confira o ID em /assinaturas."))
+        enviar_texto(user_id, visual.erro("Assinatura não encontrada.", "Confira o ID em /assinaturas."))
 
 
 def comando_menu(user_id, args):
-    whatsapp.enviar_texto(user_id, menu_comandos())
+    enviar_texto(user_id, menu_comandos())
 
 
 def comando_ajuda(user_id, args):
-    whatsapp.enviar_texto(user_id, TEXTO_AJUDA)
+    enviar_texto(user_id, TEXTO_AJUDA)
 
 
 def comando_resumo(user_id, args):
-    processar_entrada(user_id, "resumo")
+    processar_entrada(user_id, "resumo", intencao_direta="resumo")
 
 
 def comando_exportar(user_id, args):
-    processar_entrada(user_id, "exportar")
+    processar_entrada(user_id, "exportar", intencao_direta="exportacao")
 
 
 def comando_meuid(user_id, args):
-    whatsapp.enviar_texto(user_id, visual.mensagem("Seu identificador", str(user_id), rodape="Use este número em CALENDAR_USER_ID para conectar sua agenda."))
+    enviar_texto(user_id, visual.mensagem("Seu identificador", str(user_id), rodape="Use este número em CALENDAR_USER_ID para conectar sua agenda."))
+
+
+def comando_assistente(user_id, nome, args):
+    contexto_pessoal.comando(user_id, nome, args)
 
 
 COMANDOS = {
@@ -484,6 +508,9 @@ COMANDOS = {
     'fatura': comando_fatura,
     'assinaturas': comando_assinaturas,
     'cancelarassinatura': comando_cancelar_assinatura,
+    'memorias': lambda user_id, args: comando_assistente(user_id, "memorias", args),
+    'esquecer': lambda user_id, args: comando_assistente(user_id, "esquecer", args),
+    'proatividade': lambda user_id, args: comando_assistente(user_id, "proatividade", args),
 }
 
 
@@ -491,41 +518,60 @@ COMANDOS = {
 # Fluxo principal de mensagem
 # ---------------------------------------------------------------------------
 
-def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
+def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None, *, intencao_direta=None):
+    with conversa.lock(user_id):
+        contexto_pessoal.conhecer_usuario(user_id)
+        historico = conversa.historico(user_id)
+        entrada = texto or ""
+        if arquivo_bytes:
+            entrada = f"[Mídia recebida: {mime_type}] {entrada}"
+        conversa.registrar(user_id, "user", entrada)
+        return _processar_entrada(user_id, texto, arquivo_bytes, mime_type, historico, intencao_direta)
+
+
+def _processar_entrada(user_id, texto, arquivo_bytes, mime_type, historico, intencao_direta):
     if texto and not arquivo_bytes:
         consulta = assistente_pessoal.consulta_rapida(user_id, texto)
         if consulta and assistente_pessoal.executar_intencao(user_id, consulta):
             return
-    contexto = contexto_financeiro(user_id)
-    resultado = brain.interpretar_mensagem(texto, arquivo_bytes, mime_type, contexto,
-                                         contexto_temporal=assistente_pessoal.contexto(user_id))
+    if intencao_direta:
+        resultado = {"intencao": intencao_direta}
+    else:
+        contexto = contexto_financeiro(user_id)
+        resultado = brain.interpretar_mensagem(texto, arquivo_bytes, mime_type, contexto,
+                                             contexto_temporal=assistente_pessoal.contexto(user_id),
+                                             historico=historico, contexto_pessoal=contexto_pessoal.contexto(user_id))
 
     if not resultado:
-        whatsapp.enviar_texto(user_id, visual.mensagem("Pode completar o pedido?", "Diga o que deseja registrar ou consultar.", rodape="Veja exemplos em /ajuda."))
+        enviar_texto(user_id, visual.mensagem("Pode completar o pedido?", "Diga o que deseja registrar ou consultar.", rodape="Veja exemplos em /ajuda."))
         return
 
+    if contexto_pessoal.executar_intencao(user_id, resultado, texto):
+        return
+
+    contexto_pessoal.assimilar(user_id, resultado, texto)
     if assistente_pessoal.executar_intencao(user_id, resultado):
         return
 
     intencao = resultado.get("intencao")
 
     if intencao == "erro_api":
-        whatsapp.enviar_texto(
+        enviar_texto(
             user_id,
             visual.erro("O serviço de interpretação está indisponível agora.", "Tente novamente em alguns minutos. Comandos como /agenda e /hoje continuam disponíveis.")
         )
         return
 
     if intencao == "conversa":
-        whatsapp.enviar_texto(user_id, resultado.get("resposta") or "Oi! 👋 Como posso ajudar?")
+        enviar_texto(user_id, resultado.get("resposta") or "Oi! 👋 Como posso ajudar?")
         return
 
     if intencao == "transacao":
         dados = resultado["dados"]
         if not dados.get('valor'):
-            whatsapp.enviar_texto(
+            enviar_texto(
                 user_id,
-                visual.mensagem("Qual foi o valor?", "Reenvie o registro com o valor da compra.", "Exemplo: Gastei 50 no mercado.")
+                "Qual foi o valor da compra?"
             )
             return
         dados['categoria'] = dados['categoria'].capitalize()
@@ -539,11 +585,11 @@ def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
         if parcelas > 1:
             resultado_parc = criar_parcelamento(dados, parcelas, user_id)
             if not resultado_parc:
-                whatsapp.enviar_texto(user_id, visual.erro("O parcelamento não foi salvo. Tente novamente."))
+                enviar_texto(user_id, visual.erro("O parcelamento não foi salvo. Tente novamente."))
                 return
             primeira, tem_fatura = resultado_parc
             dica_fatura = "" if tem_fatura else "Configure o fechamento para acertar as datas: /fatura DIA."
-            whatsapp.enviar_texto(
+            enviar_texto(
                 user_id,
                 visual.mensagem("✓ Parcelamento agendado",
                     visual.bloco(f"{parcelas}× {_fmt_reais(dados['valor'])}", visual.nome(dados['descricao']),
@@ -568,10 +614,10 @@ def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
         else:
             msg = visual.erro("A transação não foi salva. Tente novamente.")
 
-        whatsapp.enviar_texto(user_id, msg)
+        enviar_texto(user_id, msg)
 
     elif intencao == "assinaturas":
-        whatsapp.enviar_texto(user_id, _texto_assinaturas(user_id))
+        enviar_texto(user_id, _texto_assinaturas(user_id))
 
     elif intencao == "resumo":
         meses_pt = {
@@ -585,11 +631,11 @@ def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
 
         transacoes = buscar_transacoes_mes_atual(user_id)
         if not transacoes:
-            whatsapp.enviar_texto(user_id, visual.mensagem(f"Resumo · {mes_nome}", "Ainda não há transações neste mês.",
+            enviar_texto(user_id, visual.mensagem(f"Resumo · {mes_nome}", "Ainda não há transações neste mês.",
                                                         rodape="Para começar: Gastei 50 no mercado."))
             return
 
-        whatsapp.enviar_texto(user_id, texto_resumo(transacoes, mes_nome))
+        enviar_texto(user_id, texto_resumo(transacoes, mes_nome))
         imagem = gerar_dashboard_completo(transacoes, buscar_metas(user_id), mes_nome, fuso=fuso, agora=hoje)
         whatsapp.enviar_midia(user_id, imagem, 'image/png', 'resumo_financeiro.png', 'image',
                              "Seu mês em gráficos. Barras: participação de cada grupo. Linhas: entradas e saídas acumuladas por dia.")
@@ -602,23 +648,35 @@ def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None):
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                 'financas_pessoais.xlsx', 'document', "Seu histórico completo de transações, pronto para filtrar e analisar no Excel."
             )
+            conversa.registrar(user_id, "assistant", "Planilha de transações enviada: financas_pessoais.xlsx.")
         else:
-            whatsapp.enviar_texto(user_id, visual.erro("Não foi possível gerar a planilha.", "Tente /exportar novamente em alguns instantes."))
+            enviar_texto(user_id, visual.erro("Não foi possível gerar a planilha.", "Tente /exportar novamente em alguns instantes."))
 
     elif intencao == "ajuda":
-        whatsapp.enviar_texto(user_id, TEXTO_AJUDA)
+        enviar_texto(user_id, TEXTO_AJUDA)
+
+    else:
+        enviar_texto(user_id, "Não consegui entender o que você quer fazer. Pode me explicar um pouco melhor?")
 
 
 def tratar_mensagem(user_id, texto, arquivo_bytes=None, mime_type=None):
+    with conversa.lock(user_id):
+        return _tratar_mensagem(user_id, texto, arquivo_bytes, mime_type)
+
+
+def _tratar_mensagem(user_id, texto, arquivo_bytes=None, mime_type=None):
     if texto and texto.startswith('/') and not arquivo_bytes:
+        contexto_pessoal.conhecer_usuario(user_id)
         partes = texto.split()
+        if partes[0][1:].lower() not in {"resumo", "exportar"}:
+            conversa.registrar(user_id, "user", texto)
         if assistente_pessoal.comando(user_id, partes[0][1:].lower(), partes[1:]):
             return
         comando = COMANDOS.get(partes[0][1:].lower())
         if comando:
             comando(user_id, partes[1:])
         else:
-            whatsapp.enviar_texto(user_id, menu_comandos(partes[0][1:].lower()))
+            enviar_texto(user_id, menu_comandos(partes[0][1:].lower()))
         return
     processar_entrada(user_id, texto, arquivo_bytes, mime_type)
 
@@ -653,7 +711,7 @@ def extrair_mensagem(payload):
         legenda = msg['imageMessage'].get('caption') or "Analise este comprovante"
         return user_id, legenda, key, 'image/jpeg'
     if 'audioMessage' in msg:
-        return user_id, "Transcreva o áudio e analise o gasto", key, 'audio/ogg'
+        return user_id, "Transcreva o áudio e analise o pedido", key, 'audio/ogg'
 
     texto = msg.get('conversation') or (msg.get('extendedTextMessage') or {}).get('text')
     if not texto:
@@ -670,7 +728,7 @@ def _atender(user_id, texto, key_midia, mime_type):
         # sem isso a exceção morre calada dentro da thread
         logging.exception("Erro ao atender %s", user_id)
         try:
-            whatsapp.enviar_texto(user_id, visual.erro("O pedido não foi concluído.", "Tente novamente em alguns instantes."))
+            enviar_texto(user_id, visual.erro("O pedido não foi concluído.", "Tente novamente em alguns instantes."))
         except Exception:
             logging.exception("Falha ao avisar o usuário %s do erro", user_id)
 
@@ -700,5 +758,6 @@ if __name__ == '__main__':
         threading.Thread(target=telegram.vigiar, args=(_atender, bot_username), daemon=True).start()
     threading.Thread(target=vigiar_recorrencias, daemon=True).start()
     threading.Thread(target=assistente_pessoal.vigiar, daemon=True).start()
+    threading.Thread(target=iniciativa.vigiar, daemon=True).start()
     print(f"Jarvis online no {canal}")
     servidor.run(host='0.0.0.0', port=int(os.getenv("PORT", 8000)), threaded=True)

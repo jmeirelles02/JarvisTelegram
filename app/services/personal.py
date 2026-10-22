@@ -456,6 +456,7 @@ class AssistentePessoal:
         with self.session_factory() as session:
             identificadores = [item.id for item in session.query(models.EntregaPessoal).filter(
                 models.EntregaPessoal.estado == "pendente", models.EntregaPessoal.tentar_em <= agora,
+                models.EntregaPessoal.tipo != "proativo",
             ).order_by(models.EntregaPessoal.id).limit(100).all()]
         for identificador in identificadores:
             with self.session_factory.begin() as session:

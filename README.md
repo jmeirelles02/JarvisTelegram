@@ -1,6 +1,6 @@
 ## Visão Geral do Projeto
 
-O Jarvis é um bot de Telegram desenvolvido em Python, com um transporte opcional para WhatsApp, projetado para simplificar a gestão financeira pessoal. Diferente de aplicativos tradicionais que exigem inserção manual de dados em formulários, o Jarvis utiliza LLM para interpretar linguagem natural.
+O Jarvis é um assistente pessoal no Telegram desenvolvido em Python, com um transporte opcional para WhatsApp. Usa um modelo de linguagem para conversar com contexto, organizar finanças e agenda, lembrar de preferências e avaliar quando vale a pena enviar uma sugestão espontânea.
 
 O sistema é capaz de processar entradas multimodais (texto, áudio e imagem), convertendo dados não estruturados em registros financeiros organizados em um banco de dados relacional.
 
@@ -50,6 +50,32 @@ O painel mostra entradas, saídas e resultado; a participação dos gastos por c
 ### Padrão das respostas
 
 Confirmações, listas, lembretes, avisos, comandos, erros e o resumo diário usam títulos curtos, espaços entre assuntos e uma ação clara quando necessária. Valores seguem o formato `R$ 1.234,56`, com nomes legíveis como Alimentação e Crédito. O resumo diário separa agenda, lembretes, cobranças, finanças e metas. As conversas geradas pela IA também recebem instruções para seguir esse estilo, sem tabelas ou excesso de emojis.
+
+### Continuidade da conversa
+
+O Jarvis envia à IA o histórico recente do usuário, incluindo as respostas efetivamente enviadas. Assim, um pedido pode ser completado em mensagens separadas: `Me lembra de pagar a internet amanhã` → `A que horas?` → `Às 9h`. O prompt orienta o modelo a perguntar apenas pelo detalhe que falta, acompanhar mudanças de assunto e ajudar com planejamento e dúvidas sem exigir comandos.
+
+O histórico textual fica na tabela `mensagens_conversa`, criada automaticamente na inicialização, e sobrevive ao reinício do bot. Cada usuário tem até 24 mensagens, de até 2.000 caracteres cada; o contexto enviado tem no máximo 18.000 caracteres de histórico. Mensagens com mais de 24 horas deixam de ser usadas e são apagadas na próxima gravação. Os bytes de fotos e áudios não são armazenados nesse histórico; uma mídia que ainda dependa de interpretação pode precisar ser reenviada. O histórico recente é enviado ao modelo configurado no OpenRouter junto com a nova mensagem.
+
+Atalhos locais correspondem a pedidos completos, como `resumo` ou `me dê um resumo`, quando não há histórico recente. Com histórico, a IA interpreta o texto para que respostas como `hoje` possam completar um pedido anterior. Uma palavra isolada dentro de outra frase, como `não quero resumo`, não aciona o relatório. Comandos explícitos como `/resumo` e `/exportar` continuam disponíveis sem IA. Consultas completas de agenda reconhecidas localmente também mantêm o caminho direto. Pedidos do mesmo usuário são processados em sequência dentro do processo do bot para preservar a ordem da conversa.
+
+Além desse histórico temporário, o Jarvis guarda memórias explícitas sobre preferências, rotina e objetivos na tabela `memorias_pessoais`. São até 20 informações por usuário, de até 500 caracteres cada, sem expiração automática. Cada informação precisa ser um trecho literal da mensagem atual; o sistema rejeita trechos que o modelo inventar. O modelo é orientado a selecionar apenas afirmações pessoais úteis e a não guardar hipóteses, perguntas ou credenciais. Correções usam a mesma chave e objetivos podem ser marcados como concluídos. `/memorias` mostra essas informações; `/esquecer ID` apaga uma delas, limpa o histórico recente e cancela sugestões pendentes para que o contexto antigo não seja reaproveitado.
+
+Nas conversas, a IA recebe essas memórias, lembretes ativos, dados financeiros e, quando conectado, o calendário das próximas 24 horas. Uma falha no calendário é indicada como indisponibilidade, sem concluir que a agenda está livre. A interpretação e as relações entre esses dados dependem do modelo escolhido. Ações concluídas continuam sendo confirmadas pelos serviços, e a criação de compromissos mantém a confirmação por `/confirmar ID`.
+
+### Iniciativa do assistente
+
+Após o primeiro contato de cada usuário, o Jarvis habilita sugestões espontâneas no perfil persistente `perfis_assistente`. Uma thread independente verifica a possibilidade de análise a cada minuto, sem bloquear o recebimento de mensagens ou o disparo de lembretes. Cada usuário pode ser analisado no máximo uma vez a cada 30 minutos. Se não houver sinais relevantes, não há chamada à IA.
+
+Os sinais disponíveis são conflitos entre compromissos nas próximas 24 horas, cobranças previstas nas próximas 24 horas, gastos registrados que chegam a 80% ou 100% de um limite configurado, lembretes enviados há pelo menos duas horas que ainda aguardam conclusão e objetivos explícitos sem atualização há pelo menos três dias. O Jarvis não presume que um lembrete sem confirmação esteja realmente pendente fora da conversa. Objetivos concluídos deixam de gerar sinais.
+
+A IA recebe os sinais, as memórias e a conversa recente para decidir se deve ficar em silêncio ou escolher um assunto e sugerir um próximo passo. O aviso combina o fato calculado pelos serviços com uma sugestão curta do modelo. Isso permite relacionar situações à rotina da pessoa, dentro dos assuntos para os quais existem dados. O assistente não busca notícias nem acompanha fontes externas além do calendário conectado.
+
+Por padrão, as sugestões só chegam entre **08:00 e 21:00 no fuso do usuário**, com no máximo **duas por dia** e pelo menos **quatro horas de intervalo**. Ele também espera dez minutos após uma mensagem do usuário para não interromper uma conversa em curso. O mesmo sinal tem uma chave persistente para evitar repetições após reiniciar. Há retentativas em caso de falha de envio e os fatos são verificados novamente antes da entrega; sugestões vencidas ou sem fundamento atual são descartadas. Uma falha de sincronização do calendário suspende a entrega de sugestões sobre conflitos.
+
+Esses horários e limites se aplicam às sugestões espontâneas. Lembretes solicitados, avisos de calendário, recorrências financeiras e resumo diário continuam com suas configurações próprias. `/proatividade` mostra o estado, `/proatividade off` desliga as sugestões e `/proatividade on` religa. Também é possível conversar: `Só me mande sugestões entre 10h e 19h, no máximo uma por dia` ou `Não quero receber sugestões espontâneas`.
+
+As tabelas novas são criadas pela inicialização normal; é necessário reiniciar ou reimplantar o bot para ativar o código. A avaliação depende de `OPENROUTER_API_KEY` e `OPENROUTER_MODEL`, e os dados de contexto e memórias são enviados ao modelo configurado. Sem essa configuração, a iniciativa fica em silêncio e os comandos locais continuam disponíveis.
 
 ### 3. Compras Parceladas
 
@@ -181,6 +207,8 @@ O webhook global já aponta para `http://jarvis:8000/webhook/$WEBHOOK_TOKEN` na 
 ### Testes
 
 `python -m unittest test_brain.py` valida a integração OpenRouter sem rede, chave ou banco de dados.
+
+`python -m unittest test_assistant test_conversation test_proactivity` valida memória, continuidade, seleção de avisos, horários, limites, deduplicação, correções de contexto e retentativas com SQLite em memória e IA/transporte simulados. Nenhuma mensagem real é enviada.
 
 `python test_parcelamento.py` e `python test_webhook.py` (precisam de `DATABASE_URL` no `.env`).
 

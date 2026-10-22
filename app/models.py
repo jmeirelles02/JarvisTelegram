@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, func, BigInteger, Boolean, Text
+from sqlalchemy import Column, Integer, String, Float, DateTime, func, BigInteger, Boolean, Text, UniqueConstraint
 from .database import Base
 
 class Transacao(Base):
@@ -52,6 +52,38 @@ class PreferenciasPessoais(Base):
     user_id = Column(BigInteger, primary_key=True)
     fuso = Column(String, nullable=False, default="America/Sao_Paulo")
     horario_resumo = Column(String)
+
+
+class MensagemConversa(Base):
+    __tablename__ = "mensagens_conversa"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False, index=True)
+    papel = Column(String(10), nullable=False)
+    texto = Column(Text, nullable=False)
+    criada_em = Column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class PerfilAssistente(Base):
+    __tablename__ = "perfis_assistente"
+    user_id = Column(BigInteger, primary_key=True)
+    proativo = Column(Boolean, nullable=False, default=True)
+    inicio_contato = Column(String(5), nullable=False, default="08:00")
+    fim_contato = Column(String(5), nullable=False, default="21:00")
+    limite_diario = Column(Integer, nullable=False, default=2)
+    versao_contexto = Column(Integer, nullable=False, default=0)
+    ultima_analise = Column(DateTime(timezone=True))
+
+
+class MemoriaPessoal(Base):
+    __tablename__ = "memorias_pessoais"
+    __table_args__ = (UniqueConstraint("user_id", "chave"),)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False, index=True)
+    chave = Column(String(50), nullable=False)
+    tipo = Column(String(20), nullable=False)
+    texto = Column(String(500), nullable=False)
+    concluido = Column(Boolean, nullable=False, default=False)
+    atualizada_em = Column(DateTime(timezone=True), nullable=False)
 
 
 class Lembrete(Base):

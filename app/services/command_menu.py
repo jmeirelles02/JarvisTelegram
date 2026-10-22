@@ -33,6 +33,11 @@ CATALOGO_COMANDOS = {
         ("resumodiario", "HH:MM | off", "Ativar ou desativar o envio diário"),
         ("fuso", "America/Sao_Paulo", "Configurar seu fuso horário"),
     ),
+    "Assistente pessoal": (
+        ("memorias", "", "Ver o que Jarvis lembra sobre você"),
+        ("esquecer", "ID", "Apagar uma informação pessoal"),
+        ("proatividade", "on | off", "Controlar sugestões espontâneas"),
+    ),
 }
 
 
