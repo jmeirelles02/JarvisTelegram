@@ -384,6 +384,8 @@ TEXTO_AJUDA = visual.mensagem("Como usar o Jarvis",
                  "/lembretes · /adiar ID MINUTOS\n/concluir ID · /cancelarlembrete ID\n"
                  "Concluir encerra também as próximas ocorrências."),
     visual.bloco("Agenda", "O que tenho para fazer sexta?\nMarca dentista amanhã das 15h às 16h\n"
+                 "Minha consulta desta semana ficou para quinta às 10h.\n"
+                 "Consegui antecipar a consulta em meia hora.\n"
                  "/agenda · /calendarios · /confirmar ID · /descartar ID\n"
                  "Conecte iCloud ou Google. Aviso padrão: 30 min antes."),
     visual.bloco("Seu dia", "/hoje · Resumo agora\n/resumodiario 08:00 · Ativar envio diário\n"
@@ -531,6 +533,9 @@ def processar_entrada(user_id, texto, arquivo_bytes=None, mime_type=None, *, int
 
 def _processar_entrada(user_id, texto, arquivo_bytes, mime_type, historico, intencao_direta):
     if texto and not arquivo_bytes:
+        confirmacao = assistente_pessoal.confirmacao_rapida(texto, historico)
+        if confirmacao and assistente_pessoal.executar_intencao(user_id, confirmacao):
+            return
         consulta = assistente_pessoal.consulta_rapida(user_id, texto)
         if consulta and assistente_pessoal.executar_intencao(user_id, consulta):
             return
@@ -550,7 +555,7 @@ def _processar_entrada(user_id, texto, arquivo_bytes, mime_type, historico, inte
         return
 
     contexto_pessoal.assimilar(user_id, resultado, texto)
-    if assistente_pessoal.executar_intencao(user_id, resultado):
+    if assistente_pessoal.executar_intencao(user_id, resultado, mensagem_usuario=texto, historico=historico):
         return
 
     intencao = resultado.get("intencao")

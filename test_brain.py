@@ -142,6 +142,21 @@ class OpenRouterTests(unittest.TestCase):
         with self.assertLogs("app.services.brain", level="WARNING"):
             self.assertEqual(brain.avaliar_iniciativa({"sinais": []}), {"avisar": False})
 
+    def test_planejador_recebe_eventos_reais_e_contexto_da_conversa(self):
+        self.post.return_value.json.return_value["choices"][0]["message"]["content"] = json.dumps({
+            "estado": "executar", "ref": "0", "escopo": "ocorrencia", "acao": "mover", "deslocamento_minutos": -30})
+        resultado = brain.planejar_agenda("Consegui antecipar em meia hora", {"eventos": [{"ref": "0", "titulo": "Psicólogo"}]},
+                                         [{"role": "user", "content": "Minha consulta dessa semana"}])
+        self.assertEqual(resultado["deslocamento_minutos"], -30)
+        conteudo = self.post.call_args.kwargs["json"]["messages"][-1]["content"]
+        self.assertIn("Psicólogo", conteudo)
+        self.assertIn("Minha consulta dessa semana", conteudo)
+
+    def test_planejamento_indisponivel_nao_inventa_acao(self):
+        self.post.return_value.raise_for_status.side_effect = requests.HTTPError("offline")
+        with self.assertLogs("app.services.brain", level="WARNING"):
+            self.assertEqual(brain.planejar_agenda("Adie minha consulta", {}), {"estado": "erro"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,7 @@
 import hashlib
 import logging
+import re
+import unicodedata
 import uuid
 from datetime import datetime, time, timedelta
 
@@ -7,7 +9,7 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy.exc import IntegrityError
 
 from app import models
-from app.services import agenda, calendar_service, presentation as visual
+from app.services import agenda, brain, calendar_service, presentation as visual
 from app.services.personal_time import (
     agora_utc, formatar_data, fuso_padrao, ler_data, utc, validar_fuso, validar_horario,
 )
@@ -16,9 +18,9 @@ from app.services.personal_time import (
 logger = logging.getLogger(__name__)
 REPETICOES = {"nenhuma", "diaria", "semanal", "mensal", "dias_uteis"}
 INTENCOES = {"lembrete_criar", "lembretes", "lembrete_alterar", "agenda", "evento_criar",
-             "hoje", "resumo_diario_config", "esclarecer"}
+             "evento_confirmar", "evento_descartar", "agenda_gerenciar", "hoje", "resumo_diario_config", "esclarecer"}
 COMANDOS_PESSOAIS = {"lembretes", "concluir", "adiar", "cancelarlembrete", "resumodiario", "hoje", "agenda",
-                      "calendarios", "confirmar", "descartar", "fuso"}
+                      "calendarios", "diagnosticocalendario", "confirmar", "descartar", "fuso"}
 
 
 def proxima_ocorrencia(data, repeticao, fuso, dia_original, agora):
@@ -76,6 +78,23 @@ class AssistentePessoal:
         if agenda.periodo_consulta(texto) is None:
             return None
         return agenda.interpretar_consulta(texto, self.fuso(user_id))
+
+    def confirmacao_rapida(self, texto, historico):
+        """Um sim só confirma o pedido exibido na última resposta, sem depender da IA."""
+        if not historico or historico[-1].get("role") != "assistant":
+            return None
+        ultima = historico[-1].get("content", "")
+        pedido = re.search(r"Criar: /confirmar (\d+)\b", ultima)
+        if "Confirmar compromisso" not in ultima or not pedido:
+            return None
+        normalizado = "".join(letra for letra in unicodedata.normalize("NFD", texto.lower())
+                              if unicodedata.category(letra) != "Mn")
+        normalizado = " ".join(normalizado.strip().rstrip(".!?").split())
+        if normalizado in {"sim", "confirmo", "pode criar", "pode marcar", "pode agendar", "sim pode criar", "sim, pode criar"}:
+            return {"intencao": "evento_confirmar", "dados": {"id": int(pedido.group(1))}}
+        if normalizado in {"nao", "desisti", "pode descartar", "descarta", "nao precisa", "nao, obrigado"}:
+            return {"intencao": "evento_descartar", "dados": {"id": int(pedido.group(1))}}
+        return None
 
     def criar_lembrete(self, user_id, dados, agora=None):
         agora = agora or agora_utc()
@@ -180,6 +199,88 @@ class AssistentePessoal:
     def _linhas_eventos(self, eventos, fuso):
         return agenda.linhas_eventos(eventos, fuso, agrupar=False)
 
+    def gerenciar_agenda(self, user_id, dados, pedido, historico=None, agora=None):
+        instante_fixo = agora
+        agora = agora or agora_utc()
+        fuso = self.fuso(user_id)
+        local = agora.astimezone(validar_fuso(fuso))
+        segunda = (local - timedelta(days=local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        inicio = ler_data(dados["inicio_busca"], fuso) if dados.get("inicio_busca") else utc(segunda)
+        fim = ler_data(dados["fim_busca"], fuso) if dados.get("fim_busca") else (
+            inicio + timedelta(days=7) if dados.get("inicio_busca") else utc(segunda + timedelta(days=7)))
+        if not inicio < fim <= inicio + timedelta(days=31):
+            raise ValueError("Informe um período de até 31 dias para encontrar o compromisso.")
+        calendario = self.calendario_factory(user_id)
+        if not hasattr(calendario, "alterar"):
+            raise ValueError("A alteração de compromissos ainda não está disponível para este provedor.")
+        eventos = calendario.listar(inicio, fim, fuso)
+        if not eventos:
+            return f"Não encontrei compromissos entre {formatar_data(inicio, fuso)} e {formatar_data(fim, fuso)}. Em qual dia está o compromisso que você quer mudar?"
+        if len(eventos) > 100:
+            return "Há muitos compromissos nesse período. Em qual dia está o que você quer mudar?"
+        referencias = {str(i): evento for i, evento in enumerate(eventos)}
+        contexto = {"agora": local.isoformat(), "fuso": fuso, "eventos": [
+            {"ref": ref, "titulo": evento.titulo, "inicio": evento.inicio.astimezone(local.tzinfo).isoformat(),
+             "fim": evento.fim.astimezone(local.tzinfo).isoformat(), "dia_inteiro": evento.dia_inteiro,
+             "recorrencia_original": evento.recorrencia, "recorrente": evento.recorrente}
+            for ref, evento in referencias.items()]}
+        plano = brain.planejar_agenda(pedido, contexto, historico)
+        if plano.get("estado") == "esclarecer":
+            resposta = plano.get("resposta")
+            return resposta if isinstance(resposta, str) and resposta.strip() else "Qual compromisso e horário você quer ajustar?"
+        if plano.get("estado") != "executar":
+            return "Não consegui avaliar essa alteração agora. Nenhum compromisso foi modificado."
+        ref = plano.get("ref")
+        if not isinstance(ref, str) or ref not in referencias or plano.get("escopo") != "ocorrencia":
+            raise ValueError("Preciso identificar uma ocorrência específica antes de alterar a agenda.")
+        evento = referencias[ref]
+        acao = plano.get("acao")
+        if acao not in {"mover", "cancelar"} or evento.dia_inteiro or evento.fim <= evento.inicio:
+            raise ValueError("Preciso de um compromisso com horário e de uma alteração válida.")
+        novo_inicio = None
+        if acao == "mover":
+            if plano.get("novo_inicio") is not None and plano.get("deslocamento_minutos") is not None:
+                raise ValueError("Não ficou claro qual é o novo horário. Para quando devo mover esse compromisso?")
+            if plano.get("deslocamento_minutos") is not None:
+                minutos = plano["deslocamento_minutos"]
+                if type(minutos) is not int or not -44640 <= minutos <= 44640:
+                    raise ValueError("Informe quanto deseja adiantar ou adiar esse compromisso.")
+                novo_inicio = evento.inicio + timedelta(minutes=minutos)
+            else:
+                novo_inicio = ler_data(plano.get("novo_inicio"), fuso)
+            if novo_inicio <= (instante_fixo or agora_utc()):
+                raise ValueError("O novo horário está no passado. Para quando devo mover o compromisso?")
+            if novo_inicio == evento.inicio:
+                return f"{visual.nome(evento.titulo)} já está nesse horário: {formatar_data(novo_inicio, fuso)}."
+            novo_fim = novo_inicio + (evento.fim - evento.inicio)
+            conflitos = [item for item in calendario.listar(novo_inicio, novo_fim, fuso)
+                         if item.ocupado and not (item.uid == evento.uid and item.inicio == evento.inicio)]
+            if conflitos and plano.get("permitir_conflito") is not True:
+                return (f"Esse horário coincide com {', '.join(visual.nome(item.titulo) for item in conflitos)}. "
+                        f"Quer manter {visual.nome(evento.titulo)} em {formatar_data(novo_inicio, fuso)} mesmo assim?")
+        elif evento.inicio <= (instante_fixo or agora_utc()):
+            raise ValueError("Esse compromisso já começou ou passou. Qual ocorrência você quer cancelar?")
+        identidade = calendar_service.identidade_calendario()
+        operacao = hashlib.sha256(f"{user_id}|{identidade}|{evento.uid}|{evento.recorrencia or evento.inicio.isoformat()}|{acao}|{novo_inicio}".encode()).hexdigest()
+        calendario.alterar(evento, acao, novo_inicio, operacao, fuso)
+        # Invalida o aviso do horário antigo. A próxima sincronização agenda o novo horário.
+        chave_antiga = "agenda:" + hashlib.sha256((str(user_id) + identidade + evento.uid + utc(evento.inicio).isoformat()).encode()).hexdigest()
+        with self.session_factory.begin() as session:
+            session.query(models.EntregaPessoal).filter_by(user_id=user_id, chave=chave_antiga, estado="pendente").update({"estado": "cancelado"})
+            if not evento.recorrente:
+                registros = session.query(models.EventoPendente).filter_by(user_id=user_id, uid=evento.uid, estado="criado").all()
+                for registro in registros:
+                    if acao == "cancelar":
+                        registro.estado = "cancelado"
+                    else:
+                        registro.inicio, registro.fim = novo_inicio, novo_inicio + (evento.fim - evento.inicio)
+        if acao == "cancelar":
+            return visual.mensagem("✓ Compromisso cancelado", visual.nome(evento.titulo), formatar_data(evento.inicio, fuso),
+                                   "A alteração vale apenas para essa ocorrência.")
+        return visual.mensagem("✓ Compromisso remarcado", visual.nome(evento.titulo),
+            f"De: {formatar_data(evento.inicio, fuso)}\nPara: {formatar_data(novo_inicio, fuso)}",
+            "Mantive a duração e os demais compromissos da série." if evento.recorrente else "Mantive a duração do compromisso.")
+
     def preparar_evento(self, user_id, dados, agora=None):
         agora = agora or agora_utc()
         fuso = self.fuso(user_id)
@@ -208,7 +309,7 @@ class AssistentePessoal:
             return visual.mensagem("Confirmar compromisso",
                 visual.bloco(visual.nome(titulo), f"{formatar_data(inicio, fuso)} até {horario_final}",
                              f"Aviso: {minutos} min antes · Fuso: {fuso}"), conflito,
-                rodape=f"Criar: /confirmar {evento.id}\nDescartar: /descartar {evento.id}\nO pedido expira em 15 minutos.")
+                rodape=f"Pode responder ‘pode criar’ ou ‘pode descartar’.\nCriar: /confirmar {evento.id}\nDescartar: /descartar {evento.id}\nO pedido expira em 15 minutos.")
 
     def confirmar_evento(self, user_id, identificador, descartar=False, agora=None):
         agora = agora or agora_utc()
@@ -217,6 +318,8 @@ class AssistentePessoal:
             if not evento:
                 raise ValueError("Pedido não encontrado para este usuário.")
             if evento.estado == "criado":
+                if descartar:
+                    raise ValueError("Esse compromisso já foi criado. Descartar só abandona pedidos ainda não criados. Para cancelar, diga qual compromisso e ocorrência deseja remover.")
                 return visual.mensagem("Compromisso já criado", visual.nome(evento.titulo), rodape="Confira em /agenda.")
             if evento.estado != "pendente" or utc(evento.expira_em) <= agora or utc(evento.inicio) <= agora:
                 raise ValueError("Pedido expirado ou descartado. Envie o compromisso novamente.")
@@ -297,7 +400,7 @@ class AssistentePessoal:
             secoes = ["Nenhum lembrete, compromisso ou registro financeiro para mostrar."]
         return visual.mensagem(f"Seu dia · {local.strftime('%d/%m/%Y')}", *secoes), relevante
 
-    def executar_intencao(self, user_id, resultado):
+    def executar_intencao(self, user_id, resultado, mensagem_usuario="", historico=None):
         intencao = resultado.get("intencao")
         if intencao not in INTENCOES:
             return False
@@ -315,6 +418,10 @@ class AssistentePessoal:
                 mensagem = self.agenda(user_id, dados)
             elif intencao == "evento_criar":
                 mensagem = self.preparar_evento(user_id, dados)
+            elif intencao == "agenda_gerenciar":
+                mensagem = self.gerenciar_agenda(user_id, dados, mensagem_usuario, historico)
+            elif intencao in {"evento_confirmar", "evento_descartar"}:
+                mensagem = self.confirmar_evento(user_id, self._identificador(dados.get("id")), intencao == "evento_descartar")
             elif intencao == "hoje":
                 mensagem = self.resumo(user_id)[0]
             elif intencao == "resumo_diario_config":
@@ -367,6 +474,11 @@ class AssistentePessoal:
             elif comando == "calendarios":
                 nomes = self.calendario_factory(user_id).listar_calendarios()
                 mensagem = "📅 *Seus calendários*\n\n" + "\n".join(f"• {nome}" for nome in nomes)
+            elif comando == "diagnosticocalendario":
+                calendario = self.calendario_factory(user_id)
+                if not hasattr(calendario, "diagnosticar"):
+                    raise ValueError("O diagnóstico detalhado está disponível para o iCloud.")
+                mensagem = calendario.diagnosticar()
             elif comando in {"confirmar", "descartar"}:
                 if len(args) != 1:
                     raise ValueError(f"Use /{comando} ID com o número do pedido de evento.")
@@ -378,8 +490,8 @@ class AssistentePessoal:
         except ValueError as erro:
             mensagem = visual.mensagem("Confira o pedido", str(erro))
         except Exception as erro:
-            logger.warning("Falha no comando pessoal: %s", type(erro).__name__)
-            mensagem = visual.erro("Não foi possível acessar o calendário.", "Confira as credenciais no servidor e tente novamente.")
+            logger.warning("Falha no comando pessoal /%s: %s", comando, type(erro).__name__)
+            mensagem = visual.erro("Não foi possível concluir o comando agora.", "Tente novamente em instantes. A causa pode ser uma falha de conexão ou integração.")
         self.enviar_texto(user_id, mensagem)
         return True
 

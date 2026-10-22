@@ -25,6 +25,7 @@ CATALOGO_COMANDOS = {
     "Calendário": (
         ("agenda", "", "Consultar compromissos de hoje"),
         ("calendarios", "", "Listar calendários conectados"),
+        ("diagnosticocalendario", "", "Verificar a conexão com o iCloud sem alterar eventos"),
         ("confirmar", "ID", "Confirmar a criação de um evento"),
         ("descartar", "ID", "Descartar um pedido de evento"),
     ),

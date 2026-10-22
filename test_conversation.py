@@ -107,6 +107,44 @@ class ConversaTests(unittest.TestCase):
         interpretar.assert_not_called()
         self.assertIn("Ainda não há transações", enviar.call_args.args[1])
 
+    def test_pode_criar_apos_previa_confirma_sem_modelo(self):
+        calendario = Mock()
+        calendario.listar.return_value = []
+        assistente = AssistentePessoal(self.sessions, run_bot.enviar_texto, Mock(return_value=calendario))
+        inicio = agora_utc() + timedelta(days=1)
+        previa = assistente.preparar_evento(10, {"titulo": "Dentista", "inicio": inicio.isoformat(),
+                                               "fim": (inicio + timedelta(hours=1)).isoformat()})
+        self.conversa.registrar(10, "assistant", previa)
+        with patch.object(run_bot, "conversa", self.conversa), \
+                patch.object(run_bot, "assistente_pessoal", assistente), \
+                patch.object(run_bot.whatsapp, "enviar_texto") as enviar, \
+                patch.object(run_bot.brain, "interpretar_mensagem") as interpretar:
+            run_bot.tratar_mensagem(10, "Pode criar!")
+        interpretar.assert_not_called()
+        calendario.criar.assert_called_once()
+        self.assertIn("Compromisso criado", enviar.call_args.args[1])
+
+    def test_mudanca_de_agenda_recebe_o_pedido_original_e_historico(self):
+        from app.services.calendar_service import Compromisso
+        calendario = Mock()
+        inicio = agora_utc() + timedelta(days=1)
+        calendario.listar.side_effect = [[Compromisso("p", "Psicólogo", inicio, inicio + timedelta(hours=1))], []]
+        assistente = AssistentePessoal(self.sessions, run_bot.enviar_texto, Mock(return_value=calendario))
+        self.conversa.registrar(10, "user", "Estamos falando da consulta com o psicólogo")
+        pedido = "Consegui antecipar em meia hora"
+        with patch.object(run_bot, "conversa", self.conversa), \
+                patch.object(run_bot, "assistente_pessoal", assistente), \
+                patch.object(run_bot, "contexto_financeiro", return_value=""), \
+                patch.object(run_bot.whatsapp, "enviar_texto") as enviar, \
+                patch.object(run_bot.brain, "interpretar_mensagem", return_value={"intencao": "agenda_gerenciar", "dados": {}}), \
+                patch.object(run_bot.brain, "planejar_agenda", return_value={"estado": "executar", "ref": "0",
+                    "escopo": "ocorrencia", "acao": "mover", "deslocamento_minutos": -30}) as planejar:
+            run_bot.tratar_mensagem(10, pedido)
+        self.assertEqual(planejar.call_args.args[0], pedido)
+        self.assertIn("psicólogo", planejar.call_args.args[2][0]["content"])
+        self.assertEqual(calendario.alterar.call_args.args[2], inicio - timedelta(minutes=30))
+        self.assertIn("Compromisso remarcado", enviar.call_args.args[1])
+
     def test_falha_da_memoria_nao_bloqueia_o_envio(self):
         memoria = Conversa(Mock(side_effect=RuntimeError("offline")))
         with patch.object(run_bot, "conversa", memoria), \

@@ -174,6 +174,36 @@ class AssistenteTests(unittest.TestCase):
             self.assistente.confirmar_evento(10, 1, agora=self.agora)
         self.calendario.criar.assert_not_called()
 
+    def test_sim_confirma_apenas_pedido_da_ultima_resposta(self):
+        mensagem = self.assistente.preparar_evento(10, {"titulo": "Dentista", "inicio": "2026-10-21T09:00:00",
+                                                       "fim": "2026-10-21T10:00:00"}, self.agora)
+        historico = [{"role": "assistant", "content": mensagem}]
+        self.assertEqual(self.assistente.confirmacao_rapida("Pode criar!", historico),
+                         {"intencao": "evento_confirmar", "dados": {"id": 1}})
+        self.assertEqual(self.assistente.confirmacao_rapida("não", historico),
+                         {"intencao": "evento_descartar", "dados": {"id": 1}})
+        self.assertIsNone(self.assistente.confirmacao_rapida("sim", historico + [
+            {"role": "assistant", "content": "Você quer conversar sobre outra coisa?"}]))
+        self.assertIsNone(self.assistente.confirmacao_rapida("sim", []))
+        self.calendario.criar.assert_not_called()
+
+    def test_confirmacao_natural_executa_criacao_e_impede_repeticao(self):
+        self.assistente.preparar_evento(10, {"titulo": "Dentista", "inicio": "2026-10-21T09:00:00",
+                                           "fim": "2026-10-21T10:00:00"}, self.agora)
+        with patch("app.services.personal.agora_utc", return_value=self.agora):
+            self.assertTrue(self.assistente.executar_intencao(10, {"intencao": "evento_confirmar", "dados": {"id": 1}}))
+            self.assistente.executar_intencao(10, {"intencao": "evento_confirmar", "dados": {"id": 1}})
+        self.calendario.criar.assert_called_once()
+
+    def test_descartar_compromisso_criado_informa_que_nao_exclui_evento(self):
+        self.assistente.preparar_evento(10, {"titulo": "Dentista", "inicio": "2026-10-21T09:00:00",
+                                           "fim": "2026-10-21T10:00:00"}, self.agora)
+        self.assistente.confirmar_evento(10, 1, agora=self.agora)
+        with self.assertRaisesRegex(ValueError, "Para cancelar"):
+            self.assistente.confirmar_evento(10, 1, descartar=True, agora=self.agora)
+        with self.sessions() as session:
+            self.assertEqual(session.get(models.EventoPendente, 1).estado, "criado")
+
     def test_calendario_acessivel_somente_ao_dono(self):
         with patch.dict(os.environ, {"CALENDAR_PROVIDER": "icloud", "CALENDAR_USER_ID": "10"}):
             with self.assertRaises(CalendarioIndisponivel):

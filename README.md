@@ -61,7 +61,7 @@ Atalhos locais correspondem a pedidos completos, como `resumo` ou `me dê um res
 
 Além desse histórico temporário, o Jarvis guarda memórias explícitas sobre preferências, rotina e objetivos na tabela `memorias_pessoais`. São até 20 informações por usuário, de até 500 caracteres cada, sem expiração automática. Cada informação precisa ser um trecho literal da mensagem atual; o sistema rejeita trechos que o modelo inventar. O modelo é orientado a selecionar apenas afirmações pessoais úteis e a não guardar hipóteses, perguntas ou credenciais. Correções usam a mesma chave e objetivos podem ser marcados como concluídos. `/memorias` mostra essas informações; `/esquecer ID` apaga uma delas, limpa o histórico recente e cancela sugestões pendentes para que o contexto antigo não seja reaproveitado.
 
-Nas conversas, a IA recebe essas memórias, lembretes ativos, dados financeiros e, quando conectado, o calendário das próximas 24 horas. Uma falha no calendário é indicada como indisponibilidade, sem concluir que a agenda está livre. A interpretação e as relações entre esses dados dependem do modelo escolhido. Ações concluídas continuam sendo confirmadas pelos serviços, e a criação de compromissos mantém a confirmação por `/confirmar ID`.
+Nas conversas, a IA recebe essas memórias, lembretes ativos, dados financeiros e, quando conectado, o calendário das próximas 24 horas. Uma falha no calendário é indicada como indisponibilidade, sem concluir que a agenda está livre. A interpretação e as relações entre esses dados dependem do modelo escolhido. Ações concluídas continuam sendo confirmadas pelos serviços, e a criação de compromissos mantém uma prévia para confirmação por conversa ou `/confirmar ID`.
 
 ### Iniciativa do assistente
 
@@ -128,9 +128,23 @@ JARVIS_TIMEZONE=America/Sao_Paulo
 ```
 
 4. Faça o redeploy do serviço no Render (ou recrie o container, se usar Docker). Envie `/calendarios` pelo usuário definido em `CALENDAR_USER_ID` para descobrir os nomes. Ajuste `ICLOUD_CALENDAR_NAME` com o nome exato de uma única agenda e reinicie o serviço se necessário.
-5. Consulte `/agenda` ou pergunte `Qual minha agenda de amanhã?`. Diga `Marca dentista amanhã das 15h às 16h e avisa uma hora antes` para preparar um evento. Confira os horários e use `/confirmar ID` para criar ou `/descartar ID` para desistir. O pedido expira após 15 minutos.
+5. Consulte `/agenda` ou pergunte `Qual minha agenda de amanhã?`. Diga `Marca dentista amanhã das 15h às 16h e avisa uma hora antes` para preparar um evento. Confira os horários e responda `pode criar` ou `pode descartar`; os comandos `/confirmar ID` e `/descartar ID` também funcionam. Uma resposta curta só age sobre o pedido exibido na última resposta. O pedido expira após 15 minutos.
 
-O Jarvis consulta conflitos antes de pedir confirmação. A confirmação permite criar mesmo com conflito. Nesta versão, consulta e criação usam somente a agenda escolhida; edição, exclusão e convite de participantes não estão incluídos. Compromissos existentes também geram avisos no canal ativo 30 minutos antes; eventos criados pelo Jarvis usam a antecedência pedida. Eventos de dia inteiro entram na agenda e no resumo, sem aviso automático no chat.
+O Jarvis consulta conflitos antes de pedir confirmação. A confirmação permite criar mesmo com conflito. Consulta e criação usam somente a agenda escolhida. No iCloud, a conversa também permite mover e cancelar ocorrências existentes, com as limitações descritas abaixo. Convites de participantes não são gerenciados. Compromissos existentes também geram avisos no canal ativo 30 minutos antes; eventos criados pelo Jarvis usam a antecedência pedida. Eventos de dia inteiro entram na agenda e no resumo, sem aviso automático no chat.
+
+A criação no iCloud usa um caminho estável por UID, consulta por GET e gravação por PUT com `If-None-Match: *`. Isso preserva a proteção contra duplicação/sobrescrita sem depender das consultas CalDAV REPORT por UID realizadas por `get_event_by_uid` e `save_event(no_overwrite=True)`. A leitura de agenda e a verificação de conflitos continuam usando consultas por período. Falhas de autenticação, rede e consultas REPORT têm mensagens distintas; um REPORT rejeitado não é apresentado automaticamente como credencial inválida. Os logs registram operação, tipo de erro e código HTTP quando disponível, sem incluir o corpo dos eventos ou credenciais.
+
+#### Mudanças de agenda pelo contexto
+
+O Jarvis interpreta se a pessoa está comunicando uma remarcação, um adiamento, uma antecipação ou um cancelamento. Exemplos: `Troquei meu psicólogo de dia essa semana, para quinta às 10h`, `Minha consulta ficou uma hora mais tarde` e `Consegui antecipar em meia hora`. O primeiro passo identifica a necessidade de consultar a agenda; um segundo planejamento recebe os compromissos reais do período, o fuso e a conversa recente para relacionar a frase ao evento certo. A busca padrão cobre esta semana, e pedidos sobre outras datas podem fornecer outro intervalo, de até 31 dias.
+
+Quando a mudança é clara e identifica uma ocorrência, o serviço executa e só então confirma o resultado. Mantém a duração existente; não exige que o usuário repita o título, o horário original ou a duração quando esses dados estão na agenda. Se faltar um detalhe, houver dois compromissos plausíveis ou o novo horário estiver ocupado, pergunta pelo que falta. Hipóteses, mudanças fixas na rotina e alterações da série inteira não são tratadas como uma alteração isolada. O executor atual suporta uma ocorrência por operação; alterações de todas as semanas ou de todas as próximas ainda exigem o aplicativo do calendário.
+
+No iCloud, uma remarcação recorrente grava uma exceção com o mesmo UID e o `RECURRENCE-ID` do horário original. Não exclui a série e não muda a regra semanal: a sexta desta semana pode passar à quinta, enquanto as outras sextas permanecem iguais. Cancelar uma ocorrência usa uma exceção com `STATUS:CANCELLED`. A gravação ocorre uma vez no recurso original, condicionada ao ETag (`If-Match`). Se outra pessoa ou aplicativo modificar o evento no intervalo, a gravação é recusada e o Jarvis pede uma nova consulta. Retentativas da mesma operação têm um identificador no recurso. Eventos com participantes e eventos de dia inteiro não são alterados por esse executor.
+
+#### Diagnóstico CalDAV
+
+`/diagnosticocalendario` faz apenas leituras no iCloud e separa conexão, consulta por período e busca por UID. Não cria nem modifica compromissos. Se a busca da biblioteca por período produzir `ReportError`, a leitura tenta um REPORT mínimo com intervalo de tempo e expande as recorrências localmente. Se essa consulta também for recusada, o erro informa seu código HTTP. Uma falha antiga registrada apenas como `ReportError` não permite concluir retroativamente qual resposta o servidor deu; o diagnóstico precisa ser executado na instância configurada para verificar o problema atual.
 
 Consultas simples como `O que tenho para fazer sexta?`, `Qual minha agenda de amanhã?` e `Agenda desta semana` são resolvidas localmente, sem chamada à IA nem consulta ao histórico financeiro. Datas relativas usam o fuso do usuário; `sexta` inclui hoje quando hoje é sexta, enquanto `próxima sexta` indica a seguinte. Pedidos mais complexos continuam disponíveis pela IA. Os eventos são consultados no calendário a cada pedido.
 
@@ -209,6 +223,8 @@ O webhook global já aponta para `http://jarvis:8000/webhook/$WEBHOOK_TOKEN` na 
 `python -m unittest test_brain.py` valida a integração OpenRouter sem rede, chave ou banco de dados.
 
 `python -m unittest test_assistant test_conversation test_proactivity` valida memória, continuidade, seleção de avisos, horários, limites, deduplicação, correções de contexto e retentativas com SQLite em memória e IA/transporte simulados. Nenhuma mensagem real é enviada.
+
+`python -m unittest test_calendar_changes test_agenda_reasoning` verifica a preservação das outras semanas, exceções existentes, duração, alarmes, horário de verão, gravação condicional e execução de planos de mudança. O planejador é simulado nesses testes; a qualidade de interpretação do modelo escolhido precisa ser validada com ele configurado.
 
 `python test_parcelamento.py` e `python test_webhook.py` (precisam de `DATABASE_URL` no `.env`).
 

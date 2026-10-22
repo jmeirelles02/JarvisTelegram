@@ -39,3 +39,4 @@ urllib3==2.6.3
 websockets==15.0.1
 flask==3.0.2
 caldav==3.5.0
+recurring-ical-events==3.8.2
